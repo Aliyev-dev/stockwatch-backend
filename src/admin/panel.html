@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>StockWatch Admin</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #949cad;
+    --accent: #4c8dff;
+    --ok: #3ecf8e;
+    --warn: #ffb545;
+    --bad: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .2px; }
+  h2 { font-size: 15px; margin: 28px 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: .55; cursor: progress; }
+  input[type="password"], input[type="text"] {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); padding: 9px 11px; font-size: 14px; min-width: 280px;
+  }
+  input:focus, button:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  #login { max-width: 420px; margin: 12vh auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 24px; }
+  #login h1 { margin-bottom: 6px; }
+  #login p { color: var(--muted); margin: 0 0 18px; }
+  #login .row { margin-top: 14px; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
+  .stat .value { font-size: 26px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; position: sticky; top: 0; background: var(--panel-2); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: #1b1f28; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.msg { white-space: pre-wrap; word-break: break-word; max-width: 620px; min-width: 320px; }
+  code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.active { background: rgba(62,207,142,.14); color: var(--ok); }
+  .pill.blocked { background: rgba(255,107,107,.14); color: var(--bad); }
+  .pill.other { background: rgba(255,181,69,.14); color: var(--warn); }
+  .dir { font-weight: 650; }
+  .dir.in { color: var(--accent); }
+  .dir.out { color: var(--ok); }
+
+  .muted { color: var(--muted); }
+  .empty { padding: 22px 16px; color: var(--muted); }
+  #error { display: none; background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.35); color: #ffc9c9; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<section id="login">
+  <h1>StockWatch Admin</h1>
+  <p>Enter your admin token to continue.</p>
+  <form id="login-form">
+    <input id="token" type="password" autocomplete="current-password" placeholder="ADMIN_TOKEN" aria-label="Admin token" />
+    <div class="row">
+      <button type="submit" id="login-btn">Sign in</button>
+      <span id="login-error" class="muted"></span>
+    </div>
+  </form>
+</section>
+
+<main id="app" class="wrap hidden">
+  <header>
+    <h1>StockWatch Admin</h1>
+    <div class="row">
+      <span id="updated" class="muted"></span>
+      <button id="refresh">Refresh</button>
+      <button id="logout" class="secondary">Sign out</button>
+    </div>
+  </header>
+
+  <div id="error"></div>
+
+  <div class="stats" id="stats"></div>
+
+  <h2>Users (<span id="user-count">0</span>)</h2>
+  <div class="card scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th><th>Username</th><th>Chat ID</th><th>Joined</th>
+          <th>Last seen</th><th>Status</th><th class="num">Alerts</th><th class="num">Messages</th>
+        </tr>
+      </thead>
+      <tbody id="users"></tbody>
+    </table>
+    <div id="users-empty" class="empty hidden">No users have registered yet.</div>
+  </div>
+
+  <h2>Recent messages</h2>
+  <div class="card scroll">
+    <table>
+      <thead>
+        <tr><th>When</th><th>Direction</th><th>User</th><th>Chat ID</th><th>Message</th></tr>
+      </thead>
+      <tbody id="messages"></tbody>
+    </table>
+    <div id="messages-empty" class="empty hidden">No support messages yet.</div>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var el = function (id) { return document.getElementById(id); };
+
+  function api(path, options) {
+    var opts = options || {};
+    opts.credentials = 'same-origin';
+    opts.headers = Object.assign({ 'Accept': 'application/json' }, opts.headers || {});
+    return fetch(path, opts).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) {
+          var err = new Error((body && body.message) || (body && body.error) || ('HTTP ' + res.status));
+          err.status = res.status;
+          throw err;
+        }
+        return body;
+      });
+    });
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleString(undefined, {
+      year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    });
+  }
+
+  function relative(iso) {
+    if (!iso) return '';
+    var diff = Date.now() - new Date(iso).getTime();
+    if (isNaN(diff)) return '';
+    var mins = Math.round(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.round(mins / 60);
+    if (hours < 48) return hours + 'h ago';
+    return Math.round(hours / 24) + 'd ago';
+  }
+
+  function cell(row, text, className) {
+    var td = document.createElement('td');
+    if (className) td.className = className;
+    td.textContent = text;
+    row.appendChild(td);
+    return td;
+  }
+
+  function showError(message) {
+    var box = el('error');
+    if (!message) { box.style.display = 'none'; box.textContent = ''; return; }
+    box.style.display = 'block';
+    box.textContent = message;
+  }
+
+  function renderStats(stats) {
+    var items = [
+      ['Users', stats.users],
+      ['Active', stats.activeUsers],
+      ['Blocked', stats.blockedUsers],
+      ['Messages today', stats.messagesToday],
+      ['Alerts today', stats.notificationsToday]
+    ];
+    var container = el('stats');
+    container.innerHTML = '';
+    items.forEach(function (item) {
+      var box = document.createElement('div');
+      box.className = 'stat';
+      var label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = item[0];
+      var value = document.createElement('div');
+      value.className = 'value';
+      value.textContent = (item[1] === undefined || item[1] === null) ? '—' : String(item[1]);
+      box.appendChild(label);
+      box.appendChild(value);
+      container.appendChild(box);
+    });
+  }
+
+  function statusPill(status) {
+    var span = document.createElement('span');
+    var known = status === 'active' || status === 'blocked';
+    span.className = 'pill ' + (known ? status : 'other');
+    span.textContent = status || 'unknown';
+    return span;
+  }
+
+  function renderUsers(users) {
+    var body = el('users');
+    body.innerHTML = '';
+    el('user-count').textContent = String(users.length);
+    el('users-empty').classList.toggle('hidden', users.length > 0);
+
+    users.forEach(function (u) {
+      var tr = document.createElement('tr');
+      cell(tr, u.first_name || '—');
+      cell(tr, u.username ? '@' + u.username : '—');
+      cell(tr, String(u.chat_id));
+      cell(tr, fmtDate(u.joined_at));
+      cell(tr, u.last_seen ? fmtDate(u.last_seen) + ' (' + relative(u.last_seen) + ')' : '—');
+      var statusTd = document.createElement('td');
+      statusTd.appendChild(statusPill(u.status));
+      tr.appendChild(statusTd);
+      cell(tr, String(u.notification_count || 0), 'num');
+      cell(tr, String(u.message_count || 0), 'num');
+      body.appendChild(tr);
+    });
+  }
+
+  function renderMessages(messages) {
+    var body = el('messages');
+    body.innerHTML = '';
+    el('messages-empty').classList.toggle('hidden', messages.length > 0);
+
+    messages.forEach(function (m) {
+      var tr = document.createElement('tr');
+      cell(tr, fmtDate(m.created_at));
+      var dir = document.createElement('td');
+      dir.className = 'dir ' + (m.direction === 'out' ? 'out' : 'in');
+      dir.textContent = m.direction === 'out' ? '→ user' : '← user';
+      tr.appendChild(dir);
+      cell(tr, m.first_name || (m.username ? '@' + m.username : '—'));
+      cell(tr, String(m.chat_id));
+      cell(tr, m.text || '', 'msg');
+      body.appendChild(tr);
+    });
+  }
+
+  var refreshing = false;
+  function refresh() {
+    if (refreshing) return Promise.resolve();
+    refreshing = true;
+    el('refresh').disabled = true;
+
+    return Promise.all([
+      api('/api/admin/stats'),
+      api('/api/admin/users'),
+      api('/api/admin/messages')
+    ]).then(function (results) {
+      showError('');
+      renderStats(results[0] || {});
+      renderUsers((results[1] && results[1].users) || []);
+      renderMessages((results[2] && results[2].messages) || []);
+      el('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    }).catch(function (err) {
+      if (err.status === 401) { showLogin('Session expired. Sign in again.'); return; }
+      showError('Could not load data: ' + err.message);
+    }).then(function () {
+      refreshing = false;
+      el('refresh').disabled = false;
+    });
+  }
+
+  function showLogin(message) {
+    el('app').classList.add('hidden');
+    el('login').classList.remove('hidden');
+    el('login-error').textContent = message || '';
+    el('token').value = '';
+    el('token').focus();
+  }
+
+  function showApp() {
+    el('login').classList.add('hidden');
+    el('app').classList.remove('hidden');
+    refresh();
+  }
+
+  el('login-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    var token = el('token').value.trim();
+    if (!token) { el('login-error').textContent = 'Enter your admin token.'; return; }
+    el('login-btn').disabled = true;
+    el('login-error').textContent = '';
+    api('/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    }).then(function () {
+      showApp();
+    }).catch(function (err) {
+      el('login-error').textContent = err.status === 401 ? 'Wrong token.' : err.message;
+    }).then(function () {
+      el('login-btn').disabled = false;
+    });
+  });
+
+  el('refresh').addEventListener('click', function () { refresh(); });
+
+  el('logout').addEventListener('click', function () {
+    api('/api/admin/logout', { method: 'POST' }).catch(function () {}).then(function () {
+      showLogin('Signed out.');
+    });
+  });
+
+  // Existing cookie? Go straight to the dashboard.
+  api('/api/admin/session').then(showApp).catch(function () { showLogin(''); });
+})();
+</script>
+</body>
+</html>
