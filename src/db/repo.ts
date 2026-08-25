@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { DbError, type Db } from './client';
-import type { MessageDirection, MessageRow, NotificationRow, UserRow, UserStatus } from './types';
+import type { MessageDirection, MessageRow, NotificationRow, ProductRow, UserRow, UserStatus } from './types';
 
 /** Unambiguous alphabet: no 0/O/1/I/L, so codes survive being read aloud or retyped. */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -36,6 +36,25 @@ export interface AdminUserOverview {
   last_seen: string | null;
   message_count: number;
   notification_count: number;
+  product_count: number;
+}
+
+/** One watched product as sent by the extension. */
+export interface ProductInput {
+  asin: string;
+  name: string | null;
+  domain: string;
+  threshold: number | null;
+  status: string | null;
+  quantity: number | null;
+  price: string | null;
+}
+
+export interface SyncProductsResult {
+  /** Rows inserted or refreshed. */
+  upserted: number;
+  /** Rows removed because the owner is no longer watching them. */
+  removed: number;
 }
 
 export interface AdminMessage extends MessageRow {
@@ -169,6 +188,8 @@ export class Repo {
         ...row,
         message_count: Number(row.message_count ?? 0),
         notification_count: Number(row.notification_count ?? 0),
+        // Absent on a database still running the pre-products view.
+        product_count: Number(row.product_count ?? 0),
       }));
     }
 
@@ -186,12 +207,14 @@ export class Repo {
     const chatIds = (users ?? []).map((u) => u.chat_id);
     if (chatIds.length === 0) return [];
 
-    const [messages, notifications] = await Promise.all([
+    const [messages, notifications, products] = await Promise.all([
       this.db.from('messages').select('chat_id').in('chat_id', chatIds),
       this.db.from('notifications').select('chat_id').in('chat_id', chatIds),
+      this.db.from('products').select('chat_id').in('chat_id', chatIds),
     ]);
     if (messages.error) throw new DbError('listUsers.messages', messages.error);
     if (notifications.error) throw new DbError('listUsers.notifications', notifications.error);
+    if (products.error) throw new DbError('listUsers.products', products.error);
 
     const tally = (rows: { chat_id: number }[]): Map<number, number> => {
       const counts = new Map<number, number>();
@@ -200,6 +223,7 @@ export class Repo {
     };
     const messageCounts = tally(messages.data ?? []);
     const notificationCounts = tally(notifications.data ?? []);
+    const productCounts = tally(products.data ?? []);
 
     return (users ?? []).map((u) => ({
       id: u.id,
@@ -211,6 +235,7 @@ export class Repo {
       last_seen: u.last_seen,
       message_count: messageCounts.get(u.chat_id) ?? 0,
       notification_count: notificationCounts.get(u.chat_id) ?? 0,
+      product_count: productCounts.get(u.chat_id) ?? 0,
     }));
   }
 
@@ -238,6 +263,66 @@ export class Repo {
       const user = byChatId.get(row.chat_id);
       return { ...row, username: user?.username ?? null, first_name: user?.first_name ?? null };
     });
+  }
+
+  /** Every product a user is watching, most recently updated first. */
+  async listProductsByChatId(chatId: number, limit: number): Promise<ProductRow[]> {
+    const { data, error } = await this.db
+      .from('products')
+      .select('*')
+      .eq('chat_id', chatId)
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new DbError('listProductsByChatId', error);
+    return data ?? [];
+  }
+
+  /**
+   * Replaces a user's watch list with exactly what was sent: rows in `items` are
+   * inserted or refreshed, and any of that user's rows not present any more are
+   * deleted. An empty `items` array therefore clears the list.
+   *
+   * Only this owner's rows are ever touched — every statement is scoped by chat_id.
+   */
+  async syncProducts(chatId: number, items: ProductInput[]): Promise<SyncProductsResult> {
+    const now = new Date().toISOString();
+
+    if (items.length > 0) {
+      const rows = items.map((item) => ({
+        chat_id: chatId,
+        asin: item.asin,
+        name: item.name,
+        domain: item.domain,
+        threshold: item.threshold,
+        last_status: item.status,
+        last_quantity: item.quantity,
+        last_price: item.price,
+        updated_at: now,
+      }));
+
+      const { error } = await this.db.from('products').upsert(rows, { onConflict: 'chat_id,asin,domain' });
+      if (error) throw new DbError('syncProducts.upsert', error);
+    }
+
+    // Work out what to delete from the rows that exist now, so the composite
+    // (asin, domain) identity does not have to be expressed as a filter.
+    const { data: existing, error: existingError } = await this.db
+      .from('products')
+      .select('id, asin, domain')
+      .eq('chat_id', chatId);
+    if (existingError) throw new DbError('syncProducts.list', existingError);
+
+    const keep = new Set(items.map((item) => `${item.asin}\u0000${item.domain}`));
+    const staleIds = (existing ?? [])
+      .filter((row) => !keep.has(`${row.asin}\u0000${row.domain}`))
+      .map((row) => row.id);
+
+    if (staleIds.length > 0) {
+      const { error } = await this.db.from('products').delete().eq('chat_id', chatId).in('id', staleIds);
+      if (error) throw new DbError('syncProducts.delete', error);
+    }
+
+    return { upserted: items.length, removed: staleIds.length };
   }
 
   async stats(): Promise<AdminStats> {

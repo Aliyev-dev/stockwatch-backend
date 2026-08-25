@@ -52,6 +52,27 @@ create index if not exists notifications_chat_id_idx    on public.notifications 
 create index if not exists notifications_created_at_idx on public.notifications (created_at desc);
 
 -- ---------------------------------------------------------------------------
+-- products  (what each user is watching; pushed by the extension via
+--            POST /api/products/sync, which replaces the owner's whole list)
+-- ---------------------------------------------------------------------------
+create table if not exists public.products (
+  id             uuid primary key default gen_random_uuid(),
+  chat_id        bigint not null,
+  asin           text not null,
+  name           text,
+  domain         text not null,
+  threshold      int,
+  last_status    text,
+  last_quantity  int,
+  last_price     text,
+  updated_at     timestamptz not null default now()
+);
+
+create unique index if not exists products_owner_item_key on public.products (chat_id, asin, domain);
+create index if not exists products_chat_id_idx    on public.products (chat_id);
+create index if not exists products_updated_at_idx on public.products (updated_at desc);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security
 --
 -- This backend talks to Supabase with the SERVICE ROLE key, which bypasses RLS.
@@ -61,6 +82,7 @@ create index if not exists notifications_created_at_idx on public.notifications 
 alter table public.users         enable row level security;
 alter table public.messages      enable row level security;
 alter table public.notifications enable row level security;
+alter table public.products      enable row level security;
 
 -- ---------------------------------------------------------------------------
 -- admin_user_overview
@@ -69,6 +91,9 @@ alter table public.notifications enable row level security;
 -- panel stays fast as the tables grow. security_invoker keeps the view subject
 -- to the RLS of the underlying tables, so the anon key cannot read it either.
 -- The backend falls back to counting in Node if this view is absent.
+--
+-- Re-running this file replaces the view in place; product_count is appended
+-- last so an older copy of the view upgrades cleanly.
 -- ---------------------------------------------------------------------------
 create or replace view public.admin_user_overview
 with (security_invoker = true) as
@@ -82,7 +107,8 @@ select
   u.joined_at,
   u.last_seen,
   coalesce(m.message_count, 0)      as message_count,
-  coalesce(n.notification_count, 0) as notification_count
+  coalesce(n.notification_count, 0) as notification_count,
+  coalesce(p.product_count, 0)      as product_count
 from public.users u
 left join (
   select chat_id, count(*)::bigint as message_count
@@ -93,4 +119,9 @@ left join (
   select chat_id, count(*)::bigint as notification_count
   from public.notifications
   group by chat_id
-) n on n.chat_id = u.chat_id;
+) n on n.chat_id = u.chat_id
+left join (
+  select chat_id, count(*)::bigint as product_count
+  from public.products
+  group by chat_id
+) p on p.chat_id = u.chat_id;

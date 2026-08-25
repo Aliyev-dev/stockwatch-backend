@@ -27,10 +27,24 @@ export type NotificationRow = {
   created_at: string;
 };
 
+export type ProductRow = {
+  id: string;
+  chat_id: number;
+  asin: string;
+  name: string | null;
+  domain: string;
+  threshold: number | null;
+  last_status: string | null;
+  last_quantity: number | null;
+  last_price: string | null;
+  updated_at: string;
+};
+
 /** Row shape of the admin_user_overview view created by schema.sql. */
 export type UserOverviewRow = UserRow & {
   message_count: number;
   notification_count: number;
+  product_count: number;
 };
 
 /** Minimal typed schema covering exactly the tables and view this service touches. */
@@ -57,6 +71,12 @@ export type Database = {
         Row: NotificationRow;
         Insert: Omit<NotificationRow, 'id' | 'created_at'> & { id?: string; created_at?: string };
         Update: Partial<Omit<NotificationRow, 'id'>>;
+        Relationships: [];
+      };
+      products: {
+        Row: ProductRow;
+        Insert: Omit<ProductRow, 'id' | 'updated_at'> & { id?: string; updated_at?: string };
+        Update: Partial<Omit<ProductRow, 'id'>>;
         Relationships: [];
       };
     };

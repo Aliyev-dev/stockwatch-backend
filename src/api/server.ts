@@ -8,6 +8,7 @@ import type { Notifier } from '../bot/notifier';
 import { createLogger, describeError } from '../logger';
 import { createAdminRouter } from './admin';
 import { createNotifyRouter } from './notify';
+import { createProductsRouter } from './products';
 
 const log = createLogger('api');
 
@@ -53,6 +54,7 @@ export function createServer(deps: ServerDeps): Application {
   });
 
   app.use('/api', createNotifyRouter({ config, repo, notifier }));
+  app.use('/api', createProductsRouter({ config, repo }));
   app.use('/api', createAdminRouter({ config, repo }));
 
   // The panel is a static shell with no embedded secrets: it asks for the admin

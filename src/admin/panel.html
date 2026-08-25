@@ -72,6 +72,19 @@
   .dir.in { color: var(--accent); }
   .dir.out { color: var(--ok); }
 
+  tr.expandable { cursor: pointer; }
+  tr.expandable.open { background: #1b1f28; }
+  th.caret, td.caret { width: 26px; padding-right: 0; color: var(--muted); text-align: center; }
+  td.caret span { display: inline-block; transition: transform .12s ease; }
+  tr.open td.caret span { transform: rotate(90deg); }
+  tr.detail > td { padding: 0 14px 14px 40px; background: #14171e; }
+  .detail-inner { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .detail-inner table { font-size: 12.5px; }
+  .detail-inner th { background: #191d25; }
+  .detail-inner td, .detail-inner th { padding: 8px 12px; }
+  .detail-note { padding: 12px; color: var(--muted); }
+  td.name-cell { white-space: normal; max-width: 360px; min-width: 200px; }
+
   .muted { color: var(--muted); }
   .empty { padding: 22px 16px; color: var(--muted); }
   #error { display: none; background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.35); color: #ffc9c9; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
@@ -111,8 +124,10 @@
     <table>
       <thead>
         <tr>
+          <th class="caret"></th>
           <th>Name</th><th>Username</th><th>Chat ID</th><th>Joined</th>
-          <th>Last seen</th><th>Status</th><th class="num">Alerts</th><th class="num">Messages</th>
+          <th>Last seen</th><th>Status</th>
+          <th class="num">Products</th><th class="num">Alerts</th><th class="num">Messages</th>
         </tr>
       </thead>
       <tbody id="users"></tbody>
@@ -223,6 +238,86 @@
     return span;
   }
 
+  var expanded = Object.create(null);   // chat_id -> true while its detail row is open
+  var productCache = Object.create(null); // chat_id -> product array
+
+  function productsTable(products) {
+    var wrap = document.createElement('div');
+    wrap.className = 'detail-inner';
+
+    if (!products.length) {
+      var note = document.createElement('div');
+      note.className = 'detail-note';
+      note.textContent = 'This user is not watching any products yet.';
+      wrap.appendChild(note);
+      return wrap;
+    }
+
+    var table = document.createElement('table');
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    ['Product', 'ASIN', 'Domain', 'Status', 'Qty', 'Price', 'Threshold', 'Updated'].forEach(function (label, i) {
+      var th = document.createElement('th');
+      th.textContent = label;
+      if (i === 4 || i === 6) th.className = 'num';
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    products.forEach(function (p) {
+      var tr = document.createElement('tr');
+      cell(tr, p.name || '—', 'name-cell');
+      cell(tr, p.asin || '—');
+      cell(tr, p.domain || '—');
+      cell(tr, p.last_status || '—');
+      cell(tr, p.last_quantity === null || p.last_quantity === undefined ? '—' : String(p.last_quantity), 'num');
+      cell(tr, p.last_price || '—');
+      cell(tr, p.threshold === null || p.threshold === undefined ? '—' : String(p.threshold), 'num');
+      cell(tr, p.updated_at ? fmtDate(p.updated_at) + ' (' + relative(p.updated_at) + ')' : '—');
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  function loadProducts(chatId, container) {
+    var render = function (products) {
+      container.innerHTML = '';
+      container.appendChild(productsTable(products));
+    };
+    if (productCache[chatId]) { render(productCache[chatId]); return; }
+
+    container.textContent = 'Loading products…';
+    container.className = 'detail-note';
+    api('/api/admin/users/' + encodeURIComponent(chatId) + '/products').then(function (body) {
+      var products = (body && body.products) || [];
+      productCache[chatId] = products;
+      container.className = '';
+      render(products);
+    }).catch(function (err) {
+      if (err.status === 401) { showLogin('Session expired. Sign in again.'); return; }
+      container.className = 'detail-note';
+      container.textContent = 'Could not load products: ' + err.message;
+    });
+  }
+
+  function toggleRow(userRow, detailRow, holder, chatId) {
+    var isOpen = !!expanded[chatId];
+    if (isOpen) {
+      delete expanded[chatId];
+      userRow.classList.remove('open');
+      detailRow.classList.add('hidden');
+      return;
+    }
+    expanded[chatId] = true;
+    userRow.classList.add('open');
+    detailRow.classList.remove('hidden');
+    loadProducts(chatId, holder);
+  }
+
   function renderUsers(users) {
     var body = el('users');
     body.innerHTML = '';
@@ -231,6 +326,16 @@
 
     users.forEach(function (u) {
       var tr = document.createElement('tr');
+      tr.className = 'expandable';
+      tr.title = 'Show watched products';
+
+      var caret = document.createElement('td');
+      caret.className = 'caret';
+      var chevron = document.createElement('span');
+      chevron.textContent = '›';
+      caret.appendChild(chevron);
+      tr.appendChild(caret);
+
       cell(tr, u.first_name || '—');
       cell(tr, u.username ? '@' + u.username : '—');
       cell(tr, String(u.chat_id));
@@ -239,9 +344,28 @@
       var statusTd = document.createElement('td');
       statusTd.appendChild(statusPill(u.status));
       tr.appendChild(statusTd);
+      cell(tr, String(u.product_count || 0), 'num');
       cell(tr, String(u.notification_count || 0), 'num');
       cell(tr, String(u.message_count || 0), 'num');
       body.appendChild(tr);
+
+      var detail = document.createElement('tr');
+      detail.className = 'detail hidden';
+      var detailCell = document.createElement('td');
+      detailCell.colSpan = 10;
+      var holder = document.createElement('div');
+      detailCell.appendChild(holder);
+      detail.appendChild(detailCell);
+      body.appendChild(detail);
+
+      tr.addEventListener('click', function () { toggleRow(tr, detail, holder, u.chat_id); });
+
+      // Keep rows that were open before a refresh open, with fresh data.
+      if (expanded[u.chat_id]) {
+        tr.classList.add('open');
+        detail.classList.remove('hidden');
+        loadProducts(u.chat_id, holder);
+      }
     });
   }
 
@@ -270,6 +394,7 @@
     refreshing = true;
     el('refresh').disabled = true;
 
+    productCache = Object.create(null);
     return Promise.all([
       api('/api/admin/stats'),
       api('/api/admin/users'),

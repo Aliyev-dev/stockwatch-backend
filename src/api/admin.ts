@@ -9,6 +9,7 @@ const log = createLogger('api:admin');
 
 const DEFAULT_USER_LIMIT = 500;
 const DEFAULT_MESSAGE_LIMIT = 100;
+const DEFAULT_PRODUCT_LIMIT = 500;
 const MAX_LIMIT = 1000;
 
 /** Slows down password guessing against the login form. */
@@ -78,6 +79,21 @@ export function createAdminRouter(deps: { config: Config; repo: Repo }): Router 
     } catch (err) {
       log.error(`GET /api/admin/messages failed: ${describeError(err)}`);
       res.status(503).json({ error: 'unavailable', message: 'Could not read messages from the database.' });
+    }
+  });
+
+  router.get('/admin/users/:chatId/products', guard, async (req: Request, res: Response) => {
+    const chatId = Number(req.params.chatId);
+    if (!Number.isSafeInteger(chatId)) {
+      res.status(400).json({ error: 'invalid_request', message: 'chatId must be a numeric Telegram chat id.' });
+      return;
+    }
+    try {
+      const products = await repo.listProductsByChatId(chatId, readLimit(req.query.limit, DEFAULT_PRODUCT_LIMIT));
+      res.json({ chat_id: chatId, products });
+    } catch (err) {
+      log.error(`GET /api/admin/users/${chatId}/products failed: ${describeError(err)}`);
+      res.status(503).json({ error: 'unavailable', message: 'Could not read products from the database.' });
     }
   });
 

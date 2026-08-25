@@ -1,10 +1,10 @@
-import cors, { type CorsOptions } from 'cors';
 import { Router, type Request, type Response } from 'express';
 import type { Config } from '../config';
 import type { Repo } from '../db/repo';
 import type { Notifier } from '../bot/notifier';
 import { escapeHtml } from '../bot/notifier';
 import { createLogger, describeError } from '../logger';
+import { extensionCors } from './extension-cors';
 import { RateLimiter } from './rate-limit';
 
 const log = createLogger('api:notify');
@@ -35,17 +35,11 @@ export function createNotifyRouter(deps: { config: Config; repo: Repo; notifier:
   const router = Router();
 
   // The Chrome extension calls this from a chrome-extension:// origin, so CORS is
-  // opened here — and only here. Every other route stays same-origin.
-  const corsOptions: CorsOptions = {
-    origin: config.allowedExtensionOrigin ?? true,
-    methods: ['POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type'],
-    credentials: false,
-    maxAge: 86_400,
-  };
+  // opened on the extension-facing routes only. Everything else stays same-origin.
+  const withCors = extensionCors(config);
 
-  router.options('/notify', cors(corsOptions));
-  router.post('/notify', cors(corsOptions), async (req: Request, res: Response) => {
+  router.options('/notify', withCors);
+  router.post('/notify', withCors, async (req: Request, res: Response) => {
     const payload = (req.body ?? {}) as NotifyBody;
 
     const rawCode = readText(payload.code, 32);
