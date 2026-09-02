@@ -1,6 +1,15 @@
 import { randomInt } from 'node:crypto';
 import { DbError, type Db } from './client';
-import type { MessageDirection, MessageRow, NotificationRow, ProductRow, UserRow, UserStatus } from './types';
+import type {
+  MessageDirection,
+  MessageRow,
+  NotificationRow,
+  ProductRow,
+  SupportMessageRow,
+  UserRow,
+  UserStatus,
+} from './types';
+import { diffProduct, type ProductChange } from '../lib/product-changes';
 
 /** Unambiguous alphabet: no 0/O/1/I/L, so codes survive being read aloud or retyped. */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -32,6 +41,7 @@ export interface AdminUserOverview {
   username: string | null;
   first_name: string | null;
   status: string;
+  is_active: boolean;
   joined_at: string;
   last_seen: string | null;
   message_count: number;
@@ -55,6 +65,8 @@ export interface SyncProductsResult {
   upserted: number;
   /** Rows removed because the owner is no longer watching them. */
   removed: number;
+  /** Everything that changed against the previously stored state. */
+  changes: ProductChange[];
 }
 
 export interface AdminMessage extends MessageRow {
@@ -161,6 +173,18 @@ export class Repo {
     if (error) throw new DbError('setUserStatus', error);
   }
 
+  /** Admin on/off switch (DÜZƏLİŞ 6). Returns the updated user, or null if unknown. */
+  async setUserActive(chatId: number, isActive: boolean): Promise<UserRow | null> {
+    const { data, error } = await this.db
+      .from('users')
+      .update({ is_active: isActive })
+      .eq('chat_id', chatId)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new DbError('setUserActive', error);
+    return data ?? null;
+  }
+
   async recordMessage(chatId: number, direction: MessageDirection, text: string): Promise<void> {
     const { error } = await this.db.from('messages').insert({ chat_id: chatId, direction, text });
     if (error) throw new DbError('recordMessage', error);
@@ -190,6 +214,8 @@ export class Repo {
         notification_count: Number(row.notification_count ?? 0),
         // Absent on a database still running the pre-products view.
         product_count: Number(row.product_count ?? 0),
+        // Absent on a view predating the is_active column; treat those users as active.
+        is_active: row.is_active !== false,
       }));
     }
 
@@ -231,6 +257,7 @@ export class Repo {
       username: u.username,
       first_name: u.first_name,
       status: u.status,
+      is_active: u.is_active !== false,
       joined_at: u.joined_at,
       last_seen: u.last_seen,
       message_count: messageCounts.get(u.chat_id) ?? 0,
@@ -287,6 +314,25 @@ export class Repo {
   async syncProducts(chatId: number, items: ProductInput[]): Promise<SyncProductsResult> {
     const now = new Date().toISOString();
 
+    // Read the stored state BEFORE writing, so the incoming report can be diffed
+    // against it. This is what drives the stock and price alerts.
+    const { data: existing, error: existingError } = await this.db
+      .from('products')
+      .select('*')
+      .eq('chat_id', chatId);
+    if (existingError) throw new DbError('syncProducts.list', existingError);
+
+    const key = (asin: string, domain: string): string => `${asin}\u0000${domain}`;
+    const previousByKey = new Map((existing ?? []).map((row) => [key(row.asin, row.domain), row]));
+
+    const changes: ProductChange[] = [];
+    for (const item of items) {
+      const previous = previousByKey.get(key(item.asin, item.domain));
+      // A product seen for the first time has nothing to compare against, so it
+      // is stored quietly rather than announced as a change.
+      if (previous) changes.push(...diffProduct(previous, item));
+    }
+
     if (items.length > 0) {
       const rows = items.map((item) => ({
         chat_id: chatId,
@@ -304,17 +350,9 @@ export class Repo {
       if (error) throw new DbError('syncProducts.upsert', error);
     }
 
-    // Work out what to delete from the rows that exist now, so the composite
-    // (asin, domain) identity does not have to be expressed as a filter.
-    const { data: existing, error: existingError } = await this.db
-      .from('products')
-      .select('id, asin, domain')
-      .eq('chat_id', chatId);
-    if (existingError) throw new DbError('syncProducts.list', existingError);
-
-    const keep = new Set(items.map((item) => `${item.asin}\u0000${item.domain}`));
+    const keep = new Set(items.map((item) => key(item.asin, item.domain)));
     const staleIds = (existing ?? [])
-      .filter((row) => !keep.has(`${row.asin}\u0000${row.domain}`))
+      .filter((row) => !keep.has(key(row.asin, row.domain)))
       .map((row) => row.id);
 
     if (staleIds.length > 0) {
@@ -322,7 +360,63 @@ export class Repo {
       if (error) throw new DbError('syncProducts.delete', error);
     }
 
-    return { upserted: items.length, removed: staleIds.length };
+    return { upserted: items.length, removed: staleIds.length, changes };
+  }
+
+  // --- support inbox (DÜZƏLİŞ 8+9) ----------------------------------------
+
+  async createSupportMessage(input: {
+    chatId: number;
+    username: string | null;
+    message: string;
+  }): Promise<SupportMessageRow> {
+    const { data, error } = await this.db
+      .from('support_messages')
+      .insert({ chat_id: input.chatId, username: input.username, message: input.message, reply: null })
+      .select('*')
+      .single();
+    if (error) throw new DbError('createSupportMessage', error);
+    return data;
+  }
+
+  async listSupportMessages(limit: number): Promise<SupportMessageRow[]> {
+    const { data, error } = await this.db
+      .from('support_messages')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw new DbError('listSupportMessages', error);
+    return data ?? [];
+  }
+
+  async findSupportMessage(id: string): Promise<SupportMessageRow | null> {
+    const { data, error } = await this.db.from('support_messages').select('*').eq('id', id).maybeSingle();
+    if (error) throw new DbError('findSupportMessage', error);
+    return data ?? null;
+  }
+
+  /**
+   * The thread a reply belongs to when the answer arrives without an explicit id
+   * (a reply typed in the support group): the user's most recent unanswered message.
+   */
+  async findLatestOpenSupportMessage(chatId: number): Promise<SupportMessageRow | null> {
+    const { data, error } = await this.db
+      .from('support_messages')
+      .select('*')
+      .eq('chat_id', chatId)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw new DbError('findLatestOpenSupportMessage', error);
+    return data?.[0] ?? null;
+  }
+
+  async markSupportAnswered(id: string, reply: string): Promise<void> {
+    const { error } = await this.db
+      .from('support_messages')
+      .update({ reply, status: 'answered', replied_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) throw new DbError('markSupportAnswered', error);
   }
 
   async stats(): Promise<AdminStats> {

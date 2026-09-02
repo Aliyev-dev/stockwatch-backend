@@ -1,6 +1,10 @@
 import { Router, type Request, type Response } from 'express';
 import type { Config } from '../config';
 import type { ProductInput, Repo } from '../db/repo';
+import type { UserRow } from '../db/types';
+import type { Notifier } from '../bot/notifier';
+import { renderChange, summariseChange } from '../bot/messages';
+import type { ProductChange } from '../lib/product-changes';
 import { createLogger, describeError } from '../logger';
 import { extensionCors } from './extension-cors';
 import { RateLimiter } from './rate-limit';
@@ -14,6 +18,14 @@ const MAX_DOMAIN = 128;
 const MAX_NAME = 300;
 const MAX_STATUS = 64;
 const MAX_PRICE = 64;
+
+/** Telegram tolerates roughly one message per second to a chat; pace the batch below that. */
+const DISPATCH_DELAY_MS = 250;
+
+/** Upper bound on alerts sent from a single sync, so one request cannot run for minutes. */
+const MAX_ALERTS_PER_SYNC = 25;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Per-code limits: a sync replaces the whole list, so it needs far less headroom than an alert. */
 const PER_MINUTE = new RateLimiter(30, 60_000);
@@ -89,8 +101,49 @@ export function parseProducts(raw: unknown): ProductInput[] {
   return [...byKey.values()];
 }
 
-export function createProductsRouter(deps: { config: Config; repo: Repo }): Router {
-  const { config, repo } = deps;
+/**
+ * Sends one alert per change, one after another. Sequential on purpose: a burst
+ * of parallel sends to the same chat trips Telegram's flood control, and a user
+ * who blocked the bot should stop the batch instead of failing 20 more times.
+ */
+async function dispatchChanges(
+  user: UserRow,
+  changes: ProductChange[],
+  notifier: Notifier,
+  repo: Repo,
+): Promise<number> {
+  let delivered = 0;
+
+  for (const [index, change] of changes.slice(0, MAX_ALERTS_PER_SYNC).entries()) {
+    if (index > 0) await sleep(DISPATCH_DELAY_MS);
+
+    const result = await notifier.sendToUser(user.chat_id, renderChange(change));
+    if (!result.ok) {
+      if (result.unreachable) {
+        log.warn(`chat ${user.chat_id} unreachable, dropping ${changes.length - index} remaining alerts`);
+        break;
+      }
+      continue;
+    }
+
+    delivered += 1;
+    try {
+      await repo.recordNotification(user.chat_id, summariseChange(change));
+    } catch (err) {
+      // The alert reached the user; failing to log it is not worth an error response.
+      log.error(`failed to log alert for chat ${user.chat_id}: ${describeError(err)}`);
+    }
+  }
+
+  if (changes.length > MAX_ALERTS_PER_SYNC) {
+    log.warn(`chat ${user.chat_id}: ${changes.length - MAX_ALERTS_PER_SYNC} changes not alerted (per-sync cap)`);
+  }
+
+  return delivered;
+}
+
+export function createProductsRouter(deps: { config: Config; repo: Repo; notifier: Notifier }): Router {
+  const { config, repo, notifier } = deps;
   const router = Router();
   const withCors = extensionCors(config);
 
@@ -149,7 +202,23 @@ export function createProductsRouter(deps: { config: Config; repo: Repo }): Rout
         // Bookkeeping only: the sync itself succeeded.
         log.warn(`failed to update last_seen for chat ${user.chat_id}: ${describeError(err)}`);
       }
-      res.status(200).json({ ok: true, synced: result.upserted, removed: result.removed });
+
+      // A deactivated user still has their list stored, but hears nothing. The
+      // flag is echoed back so the extension can stop polling Amazon for them.
+      const active = user.is_active !== false;
+      const alerts = active ? await dispatchChanges(user, result.changes, notifier, repo) : 0;
+      if (!active && result.changes.length > 0) {
+        log.info(`chat ${user.chat_id} is deactivated: skipped ${result.changes.length} alerts`);
+      }
+
+      res.status(200).json({
+        ok: true,
+        active,
+        synced: result.upserted,
+        removed: result.removed,
+        changes: result.changes.length,
+        alerts,
+      });
     } catch (err) {
       log.error(`sync failed for chat ${user.chat_id}: ${describeError(err)}`);
       res.status(503).json({ error: 'unavailable', message: 'Could not save the product list. Try again shortly.' });

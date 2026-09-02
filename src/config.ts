@@ -3,6 +3,8 @@ import 'dotenv/config';
 export interface Config {
   telegramBotToken: string;
   adminChatId: number;
+  /** Support group the bot forwards user messages into. Optional. */
+  supportGroupId: number | null;
   adminToken: string;
   supabaseUrl: string;
   supabaseServiceKey: string;
@@ -66,6 +68,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
+  const supportGroupRaw = (env.SUPPORT_GROUP_ID ?? '').trim();
+  let supportGroupId: number | null = null;
+  if (supportGroupRaw !== '') {
+    const parsed = Number(supportGroupRaw);
+    if (!Number.isSafeInteger(parsed) || parsed === 0) {
+      problems.push(
+        `SUPPORT_GROUP_ID must be a numeric Telegram chat id (groups are negative, e.g. -1001234567890), got "${supportGroupRaw}".`,
+      );
+    } else {
+      supportGroupId = parsed;
+    }
+  }
+
   const adminToken = readString(
     'ADMIN_TOKEN',
     problems,
@@ -106,6 +121,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     telegramBotToken,
     adminChatId,
+    supportGroupId,
     adminToken,
     supabaseUrl,
     supabaseServiceKey,

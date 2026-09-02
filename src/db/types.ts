@@ -8,6 +8,8 @@ export type UserRow = {
   first_name: string | null;
   link_code: string;
   status: string;
+  /** Admin on/off switch; false means every send path skips this user. */
+  is_active: boolean;
   joined_at: string;
   last_seen: string | null;
 };
@@ -40,6 +42,19 @@ export type ProductRow = {
   updated_at: string;
 };
 
+export type SupportMessageStatus = 'open' | 'answered';
+
+export type SupportMessageRow = {
+  id: string;
+  chat_id: number;
+  username: string | null;
+  message: string;
+  reply: string | null;
+  status: SupportMessageStatus;
+  created_at: string;
+  replied_at: string | null;
+};
+
 /** Row shape of the admin_user_overview view created by schema.sql. */
 export type UserOverviewRow = UserRow & {
   message_count: number;
@@ -53,10 +68,11 @@ export type Database = {
     Tables: {
       users: {
         Row: UserRow;
-        Insert: Omit<UserRow, 'id' | 'joined_at' | 'status'> & {
+        Insert: Omit<UserRow, 'id' | 'joined_at' | 'status' | 'is_active'> & {
           id?: string;
           joined_at?: string;
           status?: string;
+          is_active?: boolean;
         };
         Update: Partial<Omit<UserRow, 'id'>>;
         Relationships: [];
@@ -71,6 +87,17 @@ export type Database = {
         Row: NotificationRow;
         Insert: Omit<NotificationRow, 'id' | 'created_at'> & { id?: string; created_at?: string };
         Update: Partial<Omit<NotificationRow, 'id'>>;
+        Relationships: [];
+      };
+      support_messages: {
+        Row: SupportMessageRow;
+        Insert: Omit<SupportMessageRow, 'id' | 'created_at' | 'status' | 'replied_at'> & {
+          id?: string;
+          created_at?: string;
+          status?: SupportMessageStatus;
+          replied_at?: string | null;
+        };
+        Update: Partial<Omit<SupportMessageRow, 'id'>>;
         Relationships: [];
       };
       products: {

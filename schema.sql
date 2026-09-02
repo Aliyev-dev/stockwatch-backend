@@ -14,6 +14,9 @@ create table if not exists public.users (
   first_name  text,
   link_code   text not null unique,
   status      text not null default 'active',
+  -- Admin on/off switch, independent of `status` (which reflects Telegram):
+  -- a deactivated user is skipped by every send path.
+  is_active   boolean not null default true,
   joined_at   timestamptz not null default now(),
   last_seen   timestamptz
 );
@@ -21,6 +24,10 @@ create table if not exists public.users (
 create index if not exists users_chat_id_idx   on public.users (chat_id);
 create index if not exists users_link_code_idx on public.users (link_code);
 create index if not exists users_joined_at_idx on public.users (joined_at desc);
+create index if not exists users_is_active_idx on public.users (is_active);
+
+-- Existing databases: add the column without touching any data.
+alter table public.users add column if not exists is_active boolean not null default true;
 
 -- ---------------------------------------------------------------------------
 -- messages  (support chat, both directions)
@@ -73,6 +80,25 @@ create index if not exists products_chat_id_idx    on public.products (chat_id);
 create index if not exists products_updated_at_idx on public.products (updated_at desc);
 
 -- ---------------------------------------------------------------------------
+-- support_messages  (two-way support inbox: the bot writes incoming messages,
+--                    the support group or the admin panel writes the reply)
+-- ---------------------------------------------------------------------------
+create table if not exists public.support_messages (
+  id          uuid primary key default gen_random_uuid(),
+  chat_id     bigint not null,
+  username    text,
+  message     text not null,
+  reply       text,
+  status      text not null default 'open' check (status in ('open', 'answered')),
+  created_at  timestamptz not null default now(),
+  replied_at  timestamptz
+);
+
+create index if not exists support_messages_chat_id_idx    on public.support_messages (chat_id);
+create index if not exists support_messages_status_idx     on public.support_messages (status);
+create index if not exists support_messages_created_at_idx on public.support_messages (created_at desc);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security
 --
 -- This backend talks to Supabase with the SERVICE ROLE key, which bypasses RLS.
@@ -83,6 +109,7 @@ alter table public.users         enable row level security;
 alter table public.messages      enable row level security;
 alter table public.notifications enable row level security;
 alter table public.products      enable row level security;
+alter table public.support_messages enable row level security;
 
 -- ---------------------------------------------------------------------------
 -- admin_user_overview
@@ -92,10 +119,12 @@ alter table public.products      enable row level security;
 -- to the RLS of the underlying tables, so the anon key cannot read it either.
 -- The backend falls back to counting in Node if this view is absent.
 --
--- Re-running this file replaces the view in place; product_count is appended
--- last so an older copy of the view upgrades cleanly.
+-- The view is dropped and recreated rather than replaced, because its column
+-- list has grown; it holds no data of its own, so this is safe to re-run.
 -- ---------------------------------------------------------------------------
-create or replace view public.admin_user_overview
+drop view if exists public.admin_user_overview;
+
+create view public.admin_user_overview
 with (security_invoker = true) as
 select
   u.id,
@@ -104,6 +133,7 @@ select
   u.first_name,
   u.link_code,
   u.status,
+  u.is_active,
   u.joined_at,
   u.last_seen,
   coalesce(m.message_count, 0)      as message_count,

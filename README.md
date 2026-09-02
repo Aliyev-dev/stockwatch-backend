@@ -66,7 +66,12 @@ indexes, the `admin_user_overview` view used by the panel, and enables RLS with 
 policies so the `anon` key cannot read anything even if it leaks. The script is
 idempotent — re-running it is safe.
 
-> **Upgrading an existing deployment?** Re-run the whole of `schema.sql` in the SQL editor.
+> **Upgrading an existing deployment?** Run [`migration.sql`](./migration.sql) in the SQL
+> editor — it adds `users.is_active`, the `support_messages` table and the rebuilt
+> `admin_user_overview` view without touching existing rows. (Re-running the whole of
+> `schema.sql` gets you to the same place.)
+
+> **Upgrading from before products?** Re-run the whole of `schema.sql` in the SQL editor.
 > It adds the `products` table and replaces `admin_user_overview` with a version that also
 > reports `product_count`; existing tables and rows are left untouched. Until you do, the
 > backend keeps working and simply reports every product count as `0`.
@@ -100,6 +105,21 @@ every boot.
 
 ---
 
+## 3b. (Optional) Set up the support group
+
+`SUPPORT_GROUP_ID` lets a whole team answer users instead of just you.
+
+1. Create a Telegram group and add your bot to it.
+2. Send any message in the group, then open
+   `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates` in a browser and read
+   `message.chat.id` — a group id is negative (e.g. `-1001234567890`).
+3. Put that number in `SUPPORT_GROUP_ID`.
+
+Every user message is then posted into the group, and **replying to that post** sends the
+answer back to the user. This works with Telegram's default group privacy mode on: the post
+comes from the bot itself, and replies to the bot's own messages are always delivered to it.
+You do not need to make the bot an admin.
+
 ## 4. Configure the environment
 
 ```bash
@@ -110,6 +130,7 @@ cp .env.example .env
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | yes | Bot token from BotFather. Server-side only. |
 | `ADMIN_CHAT_ID` | yes | Your numeric Telegram chat id. Support messages land here. |
+| `SUPPORT_GROUP_ID` | no | Telegram group that also receives support messages. Replies typed there go back to the user. Group ids are negative, e.g. `-1001234567890`. |
 | `ADMIN_TOKEN` | yes | Password for `/admin` and the admin API. Use 32+ random chars. |
 | `SUPABASE_URL` | yes | Supabase project URL. |
 | `SUPABASE_SERVICE_KEY` | yes | Supabase **service_role** key. Server-side only. |
@@ -230,6 +251,7 @@ curl -X POST http://localhost:8080/api/notify \
 | --- | --- |
 | `200` | Delivered and logged: `{"ok":true,"delivered":true}` |
 | `400` | Missing/invalid `code`, or neither `title` nor `body` |
+| `403` | The admin deactivated this user |
 | `404` | No user has that link code |
 | `410` | The user blocked the bot (they are marked `blocked`) |
 | `429` | Rate limited — 20/minute and 200/hour per code; see `Retry-After` |
@@ -272,9 +294,25 @@ curl -X POST http://localhost:8080/api/products/sync \
 Identity is `(chat_id, asin, domain)`. A payload containing the same product twice is
 collapsed to the last occurrence rather than rejected.
 
+**Alerts are raised here.** Every incoming product is compared against the stored row, and
+the user is sent a Telegram message for each change:
+
+| Change | Message |
+| --- | --- |
+| Price up or down | old price struck through, new price in bold, signed difference, 🟢 ⬇️ / 🔴 ⬆️ |
+| Out of stock → in stock | `✅ Məhsul yenidən stokda!` with quantity and price |
+| In stock → out of stock | `❌ Məhsul stokda yoxdur` with the last known price |
+| Quantity moved | `📉 Stok azaldı` / `📈 Stok artdı`, flagged when at or below the threshold |
+
+Prices are compared as **numbers**, never as strings, so `$9.99 → $10.50` and `1.234,56 € →
+999,00 €` are both read correctly. A price that cannot be parsed (or is missing) is printed
+as *Qiymət məlum deyil* rather than left blank. A product seen for the first time is stored
+silently — there is nothing to compare it against yet. Alerts go out one after another with a
+short pause, so a big batch does not trip Telegram's flood control.
+
 | Status | Meaning |
 | --- | --- |
-| `200` | `{"ok":true,"synced":2,"removed":1}` — items written, items deleted |
+| `200` | `{"ok":true,"active":true,"synced":2,"removed":1,"changes":3,"alerts":3}` — `changes` detected, `alerts` delivered. `active:false` means the admin deactivated this user: the list is still stored, nothing is sent, and the extension should stop checking. |
 | `400` | Invalid `code`, or a malformed `products` array (the message names the exact field) |
 | `404` | No user has that link code |
 | `429` | Rate limited — 30/minute and 300/hour per code |
@@ -294,6 +332,9 @@ Authenticate with **either** an `X-Admin-Token: <ADMIN_TOKEN>` header (or
 | `GET /api/admin/users?limit=500` | Users with `joined_at`, `username`, `status`, `last_seen`, `message_count`, `notification_count`, `product_count`. |
 | `GET /api/admin/users/:chatId/products?limit=500` | Everything that user is watching, most recently updated first. This is what the expandable rows in the panel call. |
 | `GET /api/admin/messages?limit=100` | Recent messages, both directions, newest first, with the user attached. |
+| `POST /api/admin/users/:chatId/active` | Body `{"is_active": true\|false}`. The admin on/off switch: a deactivated user receives no alerts and no support replies. |
+| `GET /api/admin/support?limit=100` | Support inbox: message, reply, status (`open` / `answered`), newest first. |
+| `POST /api/admin/support/:id/reply` | Body `{"text":"…"}`. Sends the reply through the bot, stores it and marks the thread answered. |
 | `GET /api/admin/stats` | `users`, `activeUsers`, `blockedUsers`, `messagesToday`, `notificationsToday` (today = UTC day). |
 
 ```bash
@@ -305,7 +346,9 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/api/admin/stats
 - `GET /admin` — the admin panel. It renders the login form until you authenticate; every
   piece of data behind it comes from the protected endpoints above. Each user row shows a
   product count and expands on click into that user's watched products (name, ASIN, domain,
-  status, quantity, price, threshold, last updated).
+  status, quantity, price, threshold, last updated). Each row also has a
+  **Deaktiv et / Aktiv et** button, and a **Dəstək mesajları** section lists support threads
+  with an inline reply box.
 - `GET /health` — `{"ok":true,"db":"up"}`, or `503` when Supabase is unreachable. Use it as
   your host's health check.
 
@@ -315,7 +358,7 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/api/admin/stats
 | --- | --- |
 | `/start` | Registers the user (or refreshes them) and sends the link code. |
 | `/code` | Re-sends the link code. |
-| `/help` | Short usage text. |
+| `/help` | Usage text plus the support instructions. Shown in Telegram's blue command menu. |
 | `/reply <chat_id> <message>` | **Admin chat only.** Answers a user without quoting a forwarded message. |
 
 ---
@@ -332,6 +375,40 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/api/admin/stats
    `https://<your-deployment>/api/products/sync` with `{ code, products }`. Because the sync
    is a replace, removing a product client-side is communicated simply by leaving it out of
    the next payload.
+6. The sync response carries `"active": false` when the admin has deactivated that user. The
+   extension should then stop checking Amazon for them until it flips back to `true`.
+   `/api/notify` answers `403 user_inactive` in the same situation.
+
+### Checking products one at a time (extension side)
+
+Amazon blocks bursts of parallel requests, so the **extension** must walk its watch list
+sequentially rather than with `Promise.all`. This backend cannot do it for you — it never
+talks to Amazon; it only receives the results. The pattern to use in the extension's
+background worker:
+
+```js
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function checkAllProducts(products) {
+  const results = [];
+  for (const product of products) {          // sequential: NOT Promise.all
+    try {
+      results.push(await checkProduct(product));
+    } catch (err) {
+      console.warn('check failed', product.asin, err);
+    }
+    await sleep(10_000);                     // ~10s between products
+  }
+  await fetch(`${BACKEND}/api/products/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: linkCode, products: results }),
+  });
+}
+```
+
+Send the whole list in **one** sync call at the end of the pass, as above: the backend diffs
+it against the stored state and sends whatever alerts are due.
 
 The link code is the per-user shared secret — it is the only credential the extension ever
 holds. The bot token and the Supabase service key never leave this server and are never
@@ -353,8 +430,12 @@ src/
     repo.ts             every query in the app
   bot/
     index.ts            Telegraf handlers: /start, /code, /help, support chat
+    messages.ts         Telegram bodies for price/stock changes (HTML)
     notifier.ts         sends that never throw; marks blocked users
-    reply-routing.ts    maps admin replies back to the right user
+    reply-routing.ts    maps admin/support-group replies back to the right user
+  lib/
+    price.ts            price parsing (numeric compare) and stock-state reading
+    product-changes.ts  diffing a stored product against the reported one
   api/
     server.ts           Express app, security headers, error handling
     notify.ts           POST /api/notify
@@ -365,7 +446,8 @@ src/
     rate-limit.ts       fixed-window limiter
   admin/
     panel.html          the admin panel (vanilla JS, no build step)
-schema.sql              run this in the Supabase SQL editor
+schema.sql              full schema — run this on a new Supabase project
+migration.sql           incremental migration for an existing database
 scripts/copy-assets.js  copies panel.html into dist/ during build
 ```
 
@@ -387,6 +469,12 @@ scripts/copy-assets.js  copies panel.html into dist/ during build
   loop, no stack-trace spam.
 - **Rate limiting** is in-memory and per link code (alerts 20/min and 200/hour, syncs
   30/min and 300/hour), plus 10 login attempts per minute per IP.
+- **Deactivating a user** (`is_active = false`) is separate from `status`: `status` is what
+  Telegram tells us (`active` / `blocked`), `is_active` is the admin's decision. A
+  deactivated user is skipped by `/api/notify`, by sync alerts and by support replies.
+- **Support threads** are stored in `support_messages`. Whichever side answers — the admin
+  chat, the support group, or the panel — the thread is marked `answered` and the reply is
+  recorded, so the two views never disagree.
 - **Product sync is idempotent**: re-sending the same list rewrites the same rows and
   deletes nothing. A sync also refreshes the user's `last_seen`.
 
@@ -403,6 +491,9 @@ scripts/copy-assets.js  copies panel.html into dist/ during build
 | `/api/notify` returns `404` | The code is stale or mistyped; ask the user for `/code`. |
 | `/api/notify` returns `410` | The user blocked the bot. |
 | `/api/products/sync` returns `400` | The message names the offending field, e.g. `"products[2].asin" must not be empty.` |
+| Replies in the support group do nothing | The bot must be a member of that group and `SUPPORT_GROUP_ID` must match it. Reply **to the bot's forwarded post**, not to an unrelated message. |
+| A user gets no alerts at all | Check the panel: they may be deactivated (`is_active = false`) or `blocked`. |
+| `/api/products/sync` returns `"active": false` | The admin deactivated that user; nothing is sent until they are activated again. |
 | Product counts all show `0` | `schema.sql` has not been re-run since the products feature was added, so the `products` table or the updated view is missing. |
 | Admin panel keeps asking for the token | Cookies blocked, or `ADMIN_TOKEN` differs between what you type and the deployed env. |
 | CORS error in the extension console | `ALLOWED_EXTENSION_ORIGIN` is set to a different origin than the extension's. Clear it or set the exact `chrome-extension://<id>` value. |

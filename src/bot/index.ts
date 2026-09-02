@@ -54,9 +54,13 @@ function helpMessage(): string {
     '',
     '1. Copy your link code with /code.',
     '2. Paste it into the StockWatch extension settings.',
-    '3. Your price alerts arrive in this chat.',
+    '3. Your price and stock alerts arrive in this chat.',
     '',
-    'Write any message here to reach support — you will get a reply in this chat.',
+    '<b>Dəstək / Support</b>',
+    'Sualınızı və ya problemi elə bu çata yazın — mesajınız dəstək komandasına çatacaq,',
+    'cavab da bu çatda gələcək.',
+    '',
+    'Write your question here — it reaches our support team and the answer arrives in this chat.',
   ].join('\n');
 }
 
@@ -67,6 +71,13 @@ export function createBot(deps: BotDeps): BotService {
   const forwardIndex = new ForwardIndex();
 
   const isAdminChat = (ctx: Context): boolean => ctx.chat?.id === config.adminChatId;
+
+  /** The optional support group; replies typed there are relayed to the user too. */
+  const isSupportGroup = (ctx: Context): boolean =>
+    config.supportGroupId !== null && ctx.chat?.id === config.supportGroupId;
+
+  /** Either place staff can answer from. */
+  const isStaffChat = (ctx: Context): boolean => isAdminChat(ctx) || isSupportGroup(ctx);
 
   /** Answers a user without letting a failed reply bubble up into the polling loop. */
   const safeReply = async (ctx: Context, html: string): Promise<void> => {
@@ -134,7 +145,7 @@ export function createBot(deps: BotDeps): BotService {
   // --- /reply <chat_id> <text> (admin chat only) --------------------------
   // A manual escape hatch for answering a user without quoting a forwarded message.
   bot.command('reply', async (ctx) => {
-    if (!isAdminChat(ctx)) return;
+    if (!isStaffChat(ctx)) return;
     const raw = 'text' in ctx.message ? ctx.message.text : '';
     const match = /^\/reply(?:@\S+)?\s+(-?\d{1,19})\s+([\s\S]+)$/.exec(raw);
     if (!match || match[1] === undefined || match[2] === undefined) {
@@ -165,11 +176,28 @@ export function createBot(deps: BotDeps): BotService {
     } catch (err) {
       log.error(`failed to record outgoing message for chat ${userChatId}: ${describeError(err)}`);
     }
+
+    // Close the support thread this answer belongs to, so the admin panel and the
+    // group stay in sync no matter which side replied.
+    try {
+      const thread = await repo.findLatestOpenSupportMessage(userChatId);
+      if (thread) await repo.markSupportAnswered(thread.id, text);
+    } catch (err) {
+      log.error(`failed to close support thread for chat ${userChatId}: ${describeError(err)}`);
+    }
+
     await safeReply(ctx, `Sent to chat ${userChatId}. ✅`);
   };
 
-  /** Forwards a user's support message to the admin chat with a routing marker. */
-  const forwardToAdmin = async (user: UserRow, text: string): Promise<void> => {
+  /**
+   * Forwards a user's support message to the admin chat and, when configured, to
+   * the support group. Both copies carry the routing marker, and both message ids
+   * are remembered, so a reply from either place finds its way back to the user.
+   *
+   * Telegram's group privacy mode does not get in the way: the copy is sent BY the
+   * bot, and replies to the bot's own messages are always delivered to it.
+   */
+  const forwardToSupport = async (user: UserRow, text: string): Promise<void> => {
     const header = [
       `<b>${escapeHtml(displayName(user))}</b>`,
       user.username ? `@${escapeHtml(user.username)}` : null,
@@ -187,11 +215,30 @@ export function createBot(deps: BotDeps): BotService {
       `<i>Reply to this message to answer. ${buildMarker(user.chat_id)}</i>`,
     ].join('\n');
 
-    const result = await notifier.sendToAdmin(deps.config.adminChatId, body);
-    if (result.ok && result.messageId !== undefined) {
-      forwardIndex.remember(result.messageId, user.chat_id);
-    } else if (!result.ok) {
-      log.error(`failed to forward message from chat ${user.chat_id} to admin: ${result.error ?? 'unknown error'}`);
+    const targets: Array<{ label: string; chatId: number }> = [{ label: 'admin chat', chatId: config.adminChatId }];
+    if (config.supportGroupId !== null && config.supportGroupId !== config.adminChatId) {
+      targets.push({ label: 'support group', chatId: config.supportGroupId });
+    }
+
+    for (const target of targets) {
+      const result = await notifier.sendToAdmin(target.chatId, body);
+      if (result.ok && result.messageId !== undefined) {
+        forwardIndex.remember(result.messageId, user.chat_id);
+      } else if (!result.ok) {
+        log.error(
+          `failed to forward message from chat ${user.chat_id} to ${target.label} (${target.chatId}): ` +
+            `${result.error ?? 'unknown error'}`,
+        );
+      }
+    }
+  };
+
+  /** Stores the incoming support message so the admin panel can show and answer it. */
+  const recordSupportMessage = async (user: UserRow, text: string): Promise<void> => {
+    try {
+      await repo.createSupportMessage({ chatId: user.chat_id, username: user.username, message: text });
+    } catch (err) {
+      log.error(`failed to store support message from chat ${user.chat_id}: ${describeError(err)}`);
     }
   };
 
@@ -200,26 +247,31 @@ export function createBot(deps: BotDeps): BotService {
     const text = ctx.message.text;
     if (text.startsWith('/')) {
       // An unknown command: nudge the user rather than forwarding it as a report.
-      if (!isAdminChat(ctx)) await safeReply(ctx, 'Unknown command. Try /code or /help.');
+      if (!isStaffChat(ctx)) await safeReply(ctx, 'Unknown command. Try /code or /help.');
       return;
     }
 
-    if (isAdminChat(ctx)) {
+    if (isStaffChat(ctx)) {
       const quoted = ctx.message.reply_to_message;
       if (!quoted) {
-        await safeReply(
-          ctx,
-          'Reply to a forwarded message to answer that user, or use <code>/reply &lt;chat_id&gt; &lt;message&gt;</code>.',
-        );
+        // Staff talking among themselves in the group is not an answer to anyone.
+        if (isAdminChat(ctx)) {
+          await safeReply(
+            ctx,
+            'Reply to a forwarded message to answer that user, or use <code>/reply &lt;chat_id&gt; &lt;message&gt;</code>.',
+          );
+        }
         return;
       }
       const quotedText = 'text' in quoted ? quoted.text : undefined;
       const target = forwardIndex.lookup(quoted.message_id) ?? parseMarker(quotedText);
       if (target === null) {
-        await safeReply(
-          ctx,
-          'I could not tell which user that message belongs to. Use <code>/reply &lt;chat_id&gt; &lt;message&gt;</code> instead.',
-        );
+        if (isAdminChat(ctx) || quoted.from?.id === ctx.botInfo?.id) {
+          await safeReply(
+            ctx,
+            'I could not tell which user that message belongs to. Use <code>/reply &lt;chat_id&gt; &lt;message&gt;</code> instead.',
+          );
+        }
         return;
       }
       await relayToUser(ctx, target, text);
@@ -238,13 +290,17 @@ export function createBot(deps: BotDeps): BotService {
       log.error(`failed to record incoming message from chat ${result.user.chat_id}: ${describeError(err)}`);
     }
 
-    await forwardToAdmin(result.user, text);
-    await safeReply(ctx, 'Thanks — your message reached support. You will get an answer right here.');
+    await recordSupportMessage(result.user, text);
+    await forwardToSupport(result.user, text);
+    await safeReply(
+      ctx,
+      'Təşəkkürlər — mesajınız dəstək komandasına çatdı. Cavab elə bu çatda gələcək. ✅',
+    );
   });
 
   // --- anything else (photos, stickers, voice, ...) -----------------------
   bot.on('message', async (ctx) => {
-    if (isAdminChat(ctx)) return;
+    if (isStaffChat(ctx)) return;
     const result = await registerUser(ctx);
     if (result) {
       const note = '[non-text message]';
@@ -253,7 +309,8 @@ export function createBot(deps: BotDeps): BotService {
       } catch (err) {
         log.error(`failed to record non-text message from chat ${result.user.chat_id}: ${describeError(err)}`);
       }
-      await forwardToAdmin(result.user, note);
+      await recordSupportMessage(result.user, note);
+      await forwardToSupport(result.user, note);
     }
     await safeReply(ctx, 'I can only read text messages. Please describe the problem in words.');
   });
@@ -267,10 +324,11 @@ export function createBot(deps: BotDeps): BotService {
     bot,
     notifier,
     async launch(): Promise<void> {
+      // The blue command menu in Telegram. /help is the support entry point.
       await bot.telegram.setMyCommands([
-        { command: 'start', description: 'Register and get your link code' },
-        { command: 'code', description: 'Show your link code again' },
-        { command: 'help', description: 'How the StockWatch bot works' },
+        { command: 'start', description: 'Qeydiyyat və link kodu / Register' },
+        { command: 'code', description: 'Link kodumu göstər / Show my link code' },
+        { command: 'help', description: 'Kömək və dəstək / Help and support' },
       ]);
       // `launch()` only resolves when polling stops, so we start it in the
       // background and surface startup failures through the error log.

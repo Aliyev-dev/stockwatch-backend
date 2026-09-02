@@ -54,8 +54,8 @@ export function createServer(deps: ServerDeps): Application {
   });
 
   app.use('/api', createNotifyRouter({ config, repo, notifier }));
-  app.use('/api', createProductsRouter({ config, repo }));
-  app.use('/api', createAdminRouter({ config, repo }));
+  app.use('/api', createProductsRouter({ config, repo, notifier }));
+  app.use('/api', createAdminRouter({ config, repo, notifier }));
 
   // The panel is a static shell with no embedded secrets: it asks for the admin
   // token, exchanges it for the session cookie, and every data call behind it is

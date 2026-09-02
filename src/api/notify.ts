@@ -82,6 +82,13 @@ export function createNotifyRouter(deps: { config: Config; repo: Repo; notifier:
       return;
     }
 
+    // Deactivated by the admin: accept the call, deliver nothing, and say so
+    // clearly enough that the extension can stop sending for this code.
+    if (user.is_active === false) {
+      res.status(403).json({ error: 'user_inactive', message: 'This user has been deactivated by the administrator.' });
+      return;
+    }
+
     const html = [title ? `<b>${escapeHtml(title)}</b>` : null, body ? escapeHtml(body) : null]
       .filter((part): part is string => part !== null)
       .join('\n\n');
