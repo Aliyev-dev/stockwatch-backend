@@ -1,102 +1,81 @@
 import { escapeHtml } from './notifier';
+import { t, type Language } from './i18n';
 import { formatAmount } from '../lib/price';
 import type { ProductChange, ProductIdentity } from '../lib/product-changes';
 
 /**
- * Telegram message bodies for product changes. HTML parse mode: <s> for the old
- * price, <b> for the new one. Every value that comes from the extension or from
- * Amazon is escaped before it reaches the message.
- */
-
-const UNKNOWN_PRICE = 'Qiymət məlum deyil';
-
-/** Never leave the price cell empty — an unknown price says so explicitly. */
-export function priceLine(label: string, price: string | null | undefined): string {
-  if (price === null || price === undefined || price.trim() === '') {
-    return `${label}: <i>${UNKNOWN_PRICE}</i>`;
-  }
-  return `${label}: <b>${escapeHtml(price.trim())}</b>`;
-}
-
-function heading(product: ProductIdentity): string[] {
-  const title = product.name && product.name.trim() !== '' ? product.name.trim() : product.asin;
-  return [
-    `<b>${escapeHtml(title)}</b>`,
-    `ASIN: <code>${escapeHtml(product.asin)}</code> · ${escapeHtml(product.domain)}`,
-  ];
-}
-
-function quantityLine(quantity: number | null): string | null {
-  if (typeof quantity !== 'number') return null;
-  return `Miqdar: <b>${quantity}</b>`;
-}
-
-/**
- * Old price struck through, then the new price with a green/red signal and the
- * signed difference.
+ * Telegram message bodies for product changes.
  *
- *   Əvvəlki qiymət: <s>$29.99</s>
- *   🟢 ⬇️ Yeni qiymət: <b>$24.99</b> (−$5.00)
+ * Every string comes from `src/bot/i18n.ts` in the user's own language; nothing
+ * user-facing is written here. HTML parse mode is used, so each interpolated
+ * value is escaped first.
  */
-export function priceChangeBlock(change: Extract<ProductChange, { kind: 'price' }>): string {
-  const signal = change.direction === 'down' ? '🟢 ⬇️' : '🔴 ⬆️';
-  const sign = change.direction === 'down' ? '−' : '+';
-  const delta = formatAmount(Math.abs(change.delta), change.newPrice);
 
-  return [
-    `Əvvəlki qiymət: <s>${escapeHtml(change.oldPrice.trim())}</s>`,
-    `${signal} Yeni qiymət: <b>${escapeHtml(change.newPrice.trim())}</b> (${sign}${escapeHtml(delta)})`,
-  ].join('\n');
+function titleOf(product: ProductIdentity): string {
+  const title = product.name && product.name.trim() !== '' ? product.name.trim() : product.asin;
+  return escapeHtml(title);
 }
 
-/** Full Telegram body for one change. */
-export function renderChange(change: ProductChange): string {
-  const lines = [...heading(change.product), ''];
+/** Never leave the price empty — an unknown price says so in the user's language. */
+export function priceText(price: string | null | undefined, lang: Language): string {
+  if (price === null || price === undefined || price.trim() === '') {
+    return `<i>${t(lang, 'price_unknown')}</i>`;
+  }
+  return `<b>${escapeHtml(price.trim())}</b>`;
+}
+
+/** Full Telegram body for one change, in the user's language. */
+export function renderChange(change: ProductChange, lang: Language): string {
+  const name = titleOf(change.product);
 
   switch (change.kind) {
-    case 'back_in_stock': {
-      lines.unshift('✅ <b>Məhsul yenidən stokda!</b>', '');
-      const qty = quantityLine(change.quantity);
-      if (qty) lines.push(qty);
-      lines.push(priceLine('Qiymət', change.price));
-      break;
-    }
+    case 'back_in_stock':
+      return t(
+        lang,
+        'back_in_stock',
+        name,
+        change.quantity === null ? '—' : change.quantity,
+        priceText(change.price, lang),
+      );
 
-    case 'out_of_stock': {
-      lines.unshift('❌ <b>Məhsul stokda yoxdur</b>', '');
-      lines.push(priceLine('Son qiymət', change.price));
-      break;
-    }
+    case 'out_of_stock':
+      return t(lang, 'out_of_stock', name);
 
     case 'quantity': {
-      const arrow = change.direction === 'down' ? '📉' : '📈';
-      const verb = change.direction === 'down' ? 'Stok azaldı' : 'Stok artdı';
-      lines.unshift(`${arrow} <b>${verb}</b>`, '');
-      lines.push(`Miqdar: <s>${change.oldQuantity}</s> → <b>${change.newQuantity}</b>`);
+      const key = change.direction === 'up' ? 'stock_increase' : 'stock_decrease';
+      const body = t(lang, key, name, change.newQuantity, priceText(change.price, lang));
       if (change.belowThreshold && change.threshold !== null) {
-        lines.push(`⚠️ Həddən aşağıdır (hədd: ${change.threshold})`);
+        return `${body}\n${t(lang, 'below_threshold', change.threshold)}`;
       }
-      lines.push(priceLine('Qiymət', change.price));
-      break;
+      return body;
     }
 
     case 'price': {
-      lines.unshift('💰 <b>Qiymət dəyişdi</b>', '');
-      lines.push(priceChangeBlock(change));
-      if (change.stock === 'out_of_stock') lines.push('', '❌ Hazırda stokda yoxdur.');
-      break;
+      const dropped = change.direction === 'down';
+      const delta = formatAmount(Math.abs(change.delta), change.newPrice);
+      return t(
+        lang,
+        'price_change',
+        name,
+        escapeHtml(change.oldPrice.trim()),
+        escapeHtml(change.newPrice.trim()),
+        dropped,
+        escapeHtml(delta),
+      );
     }
   }
-
-  return lines.join('\n');
 }
 
-/** Short plain-text form stored in the notifications table and shown in the panel. */
+/**
+ * Short plain-text form stored in the notifications table and shown in the admin
+ * panel. Admin-facing, so it stays in one language regardless of the user's.
+ */
 export function summariseChange(change: ProductChange): string {
-  const title = change.product.name && change.product.name.trim() !== '' ? change.product.name.trim() : change.product.asin;
+  const title =
+    change.product.name && change.product.name.trim() !== '' ? change.product.name.trim() : change.product.asin;
   switch (change.kind) {
     case 'back_in_stock':
-      return `${title}: yenidən stokda (${change.price ?? UNKNOWN_PRICE})`;
+      return `${title}: yenidən stokda (${change.price ?? '?'})`;
     case 'out_of_stock':
       return `${title}: stokda yoxdur`;
     case 'quantity':

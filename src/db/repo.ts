@@ -10,6 +10,7 @@ import type {
   UserStatus,
 } from './types';
 import { diffProduct, type ProductChange } from '../lib/product-changes';
+import { normaliseLanguage, type Language } from '../bot/i18n';
 
 /** Unambiguous alphabet: no 0/O/1/I/L, so codes survive being read aloud or retyped. */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -42,6 +43,7 @@ export interface AdminUserOverview {
   first_name: string | null;
   status: string;
   is_active: boolean;
+  language: string;
   joined_at: string;
   last_seen: string | null;
   message_count: number;
@@ -185,6 +187,18 @@ export class Repo {
     return data ?? null;
   }
 
+  /** Stores the language the user picked in the bot. */
+  async setUserLanguage(chatId: number, language: Language): Promise<UserRow | null> {
+    const { data, error } = await this.db
+      .from('users')
+      .update({ language })
+      .eq('chat_id', chatId)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new DbError('setUserLanguage', error);
+    return data ?? null;
+  }
+
   async recordMessage(chatId: number, direction: MessageDirection, text: string): Promise<void> {
     const { error } = await this.db.from('messages').insert({ chat_id: chatId, direction, text });
     if (error) throw new DbError('recordMessage', error);
@@ -216,6 +230,7 @@ export class Repo {
         product_count: Number(row.product_count ?? 0),
         // Absent on a view predating the is_active column; treat those users as active.
         is_active: row.is_active !== false,
+        language: normaliseLanguage(row.language),
       }));
     }
 
@@ -258,6 +273,7 @@ export class Repo {
       first_name: u.first_name,
       status: u.status,
       is_active: u.is_active !== false,
+      language: normaliseLanguage(u.language),
       joined_at: u.joined_at,
       last_seen: u.last_seen,
       message_count: messageCounts.get(u.chat_id) ?? 0,

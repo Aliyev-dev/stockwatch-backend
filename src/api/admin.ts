@@ -3,6 +3,7 @@ import type { Config } from '../config';
 import type { Repo } from '../db/repo';
 import type { Notifier } from '../bot/notifier';
 import { escapeHtml } from '../bot/notifier';
+import { normaliseLanguage, t } from '../bot/i18n';
 import { createLogger, describeError } from '../logger';
 import { ADMIN_COOKIE, adminCookieOptions, requireAdmin, tokensMatch } from './auth';
 import { RateLimiter } from './rate-limit';
@@ -166,7 +167,19 @@ export function createAdminRouter(deps: { config: Config; repo: Repo; notifier: 
       return;
     }
 
-    const sent = await notifier.sendToUser(thread.chat_id, `<b>StockWatch dəstək</b>\n\n${escapeHtml(text)}`);
+    // Answer the user in the language they picked in the bot.
+    let language = normaliseLanguage(null);
+    try {
+      const user = await repo.findUserByChatId(thread.chat_id);
+      language = normaliseLanguage(user?.language);
+    } catch (err) {
+      log.warn(`could not read language for chat ${thread.chat_id}: ${describeError(err)}`);
+    }
+
+    const sent = await notifier.sendToUser(
+      thread.chat_id,
+      `<b>${t(language, 'support_reply_prefix')}</b>\n\n${escapeHtml(text)}`,
+    );
     if (!sent.ok) {
       res.status(sent.unreachable ? 410 : 502).json({
         error: sent.unreachable ? 'user_unreachable' : 'delivery_failed',

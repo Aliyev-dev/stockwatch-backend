@@ -17,6 +17,8 @@ create table if not exists public.users (
   -- Admin on/off switch, independent of `status` (which reflects Telegram):
   -- a deactivated user is skipped by every send path.
   is_active   boolean not null default true,
+  -- Bot dili: 'az' | 'en' | 'ru' | 'tr' | 'de'.
+  language    text not null default 'az' check (language in ('az', 'en', 'ru', 'tr', 'de')),
   joined_at   timestamptz not null default now(),
   last_seen   timestamptz
 );
@@ -28,6 +30,7 @@ create index if not exists users_is_active_idx on public.users (is_active);
 
 -- Existing databases: add the column without touching any data.
 alter table public.users add column if not exists is_active boolean not null default true;
+alter table public.users add column if not exists language text not null default 'az';
 
 -- ---------------------------------------------------------------------------
 -- messages  (support chat, both directions)
@@ -134,6 +137,7 @@ select
   u.link_code,
   u.status,
   u.is_active,
+  u.language,
   u.joined_at,
   u.last_seen,
   coalesce(m.message_count, 0)      as message_count,

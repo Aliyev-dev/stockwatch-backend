@@ -4,8 +4,9 @@ Central notification + user-management service for the StockWatch Chrome extensi
 
 It is one always-on Node process that runs three things:
 
-- **A Telegram bot** (Telegraf, long polling). Users press `/start`, get a personal
-  **link code**, and receive their price alerts in that chat. The bot token lives only
+- **A Telegram bot** (Telegraf, long polling). Users press `/start`, pick one of five
+  languages, get a personal **link code**, and receive their price alerts in that chat, in
+  the language they chose. The bot token lives only
   on this server — users never see or handle it.
 - **A JSON API** (Express). The extension calls `POST /api/notify` with a user's link
   code to deliver an alert and `POST /api/products/sync` to keep their watch list up to
@@ -66,6 +67,11 @@ indexes, the `admin_user_overview` view used by the panel, and enables RLS with 
 policies so the `anon` key cannot read anything even if it leaks. The script is
 idempotent — re-running it is safe.
 
+> **Upgrading to the language release?** Run [`migration_language.sql`](./migration_language.sql)
+> in the SQL editor — it adds `users.language` (default `'az'`, so existing users keep
+> working) and rebuilds `admin_user_overview` with that column. No `telegram_id` column is
+> needed: `users.chat_id` already is the Telegram user id.
+
 > **Upgrading an existing deployment?** Run [`migration.sql`](./migration.sql) in the SQL
 > editor — it adds `users.is_active`, the `support_messages` table and the rebuilt
 > `admin_user_overview` view without touching existing rows. (Re-running the whole of
@@ -104,6 +110,24 @@ every boot.
 3. Also press **Start** on your own StockWatch bot once, so Telegram lets it message you.
 
 ---
+
+## 3a. Onboarding and languages
+
+The link you hand out is just `https://t.me/<your_bot_username>`. Pressing **Start** runs:
+
+1. the user is registered (or refreshed) in `users`;
+2. the bot shows a language picker — 🇦🇿 Azərbaycan, 🇬🇧 English, 🇷🇺 Русский, 🇹🇷 Türkçe,
+   🇩🇪 Deutsch;
+3. after the choice, the welcome text and the **link code** arrive in that language.
+
+Every later message — alerts, support replies, errors — uses the stored language.
+`/language` reopens the picker; `/code` re-sends the code. `https://t.me/<bot>?start=help`
+opens the same flow and then invites the user to write their support message.
+
+All bot texts live in [`src/bot/i18n.ts`](src/bot/i18n.ts). `t(lang, key, ...args)` resolves
+them: an unknown language falls back to `az`, a missing key falls back to the `az` entry, and
+values may be plain strings or functions. To add a language, add its dictionary there and its
+code to the `language` check in `schema.sql`.
 
 ## 3b. (Optional) Set up the support group
 
@@ -329,7 +353,7 @@ Authenticate with **either** an `X-Admin-Token: <ADMIN_TOKEN>` header (or
 | `POST /api/admin/login` | Body `{"token":"…"}`. Sets the session cookie (7 days, HttpOnly). |
 | `POST /api/admin/logout` | Clears the cookie. |
 | `GET /api/admin/session` | `200` if the current credentials are valid. |
-| `GET /api/admin/users?limit=500` | Users with `joined_at`, `username`, `status`, `last_seen`, `message_count`, `notification_count`, `product_count`. |
+| `GET /api/admin/users?limit=500` | Users with `joined_at`, `username`, `status`, `last_seen`, `message_count`, `notification_count`, `product_count`, `language`. |
 | `GET /api/admin/users/:chatId/products?limit=500` | Everything that user is watching, most recently updated first. This is what the expandable rows in the panel call. |
 | `GET /api/admin/messages?limit=100` | Recent messages, both directions, newest first, with the user attached. |
 | `POST /api/admin/users/:chatId/active` | Body `{"is_active": true\|false}`. The admin on/off switch: a deactivated user receives no alerts and no support replies. |
@@ -347,7 +371,7 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/api/admin/stats
   piece of data behind it comes from the protected endpoints above. Each user row shows a
   product count and expands on click into that user's watched products (name, ASIN, domain,
   status, quantity, price, threshold, last updated). Each row also has a
-  **Deaktiv et / Aktiv et** button, and a **Dəstək mesajları** section lists support threads
+  **Deaktiv et / Aktiv et** button and the user's chosen language, and a **Dəstək mesajları** section lists support threads
   with an inline reply box.
 - `GET /health` — `{"ok":true,"db":"up"}`, or `503` when Supabase is unreachable. Use it as
   your host's health check.
@@ -359,6 +383,7 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8080/api/admin/stats
 | `/start` | Registers the user (or refreshes them) and sends the link code. |
 | `/code` | Re-sends the link code. |
 | `/help` | Usage text plus the support instructions. Shown in Telegram's blue command menu. |
+| `/language` | Reopens the five-language picker. |
 | `/reply <chat_id> <message>` | **Admin chat only.** Answers a user without quoting a forwarded message. |
 
 ---
@@ -430,7 +455,8 @@ src/
     repo.ts             every query in the app
   bot/
     index.ts            Telegraf handlers: /start, /code, /help, support chat
-    messages.ts         Telegram bodies for price/stock changes (HTML)
+    i18n.ts             every user-facing text, in az / en / ru / tr / de
+    messages.ts         Telegram bodies for price/stock changes (HTML), via i18n
     notifier.ts         sends that never throw; marks blocked users
     reply-routing.ts    maps admin/support-group replies back to the right user
   lib/
@@ -447,7 +473,8 @@ src/
   admin/
     panel.html          the admin panel (vanilla JS, no build step)
 schema.sql              full schema — run this on a new Supabase project
-migration.sql           incremental migration for an existing database
+migration.sql           incremental migration (is_active + support inbox)
+migration_language.sql  incremental migration (user language)
 scripts/copy-assets.js  copies panel.html into dist/ during build
 ```
 
@@ -469,6 +496,9 @@ scripts/copy-assets.js  copies panel.html into dist/ during build
   loop, no stack-trace spam.
 - **Rate limiting** is in-memory and per link code (alerts 20/min and 200/hour, syncs
   30/min and 300/hour), plus 10 login attempts per minute per IP.
+- **Language** is stored per user in `users.language` and applied wherever the bot speaks to
+  them. Nothing user-facing is hard-coded outside `src/bot/i18n.ts`; staff-facing strings in
+  the admin chat stay in English on purpose.
 - **Deactivating a user** (`is_active = false`) is separate from `status`: `status` is what
   Telegram tells us (`active` / `blocked`), `is_active` is the admin's decision. A
   deactivated user is skipped by `/api/notify`, by sync alerts and by support replies.
@@ -492,6 +522,7 @@ scripts/copy-assets.js  copies panel.html into dist/ during build
 | `/api/notify` returns `410` | The user blocked the bot. |
 | `/api/products/sync` returns `400` | The message names the offending field, e.g. `"products[2].asin" must not be empty.` |
 | Replies in the support group do nothing | The bot must be a member of that group and `SUPPORT_GROUP_ID` must match it. Reply **to the bot's forwarded post**, not to an unrelated message. |
+| Alerts arrive in the wrong language | The user can run `/language`; the admin panel's DIL column shows what is stored. |
 | A user gets no alerts at all | Check the panel: they may be deactivated (`is_active = false`) or `blocked`. |
 | `/api/products/sync` returns `"active": false` | The admin deactivated that user; nothing is sent until they are activated again. |
 | Product counts all show `0` | `schema.sql` has not been re-run since the products feature was added, so the `products` table or the updated view is missing. |

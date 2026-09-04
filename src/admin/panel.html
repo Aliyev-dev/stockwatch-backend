@@ -135,7 +135,7 @@
         <tr>
           <th class="caret"></th>
           <th>Name</th><th>Username</th><th>Chat ID</th><th>Joined</th>
-          <th>Last seen</th><th>Status</th>
+          <th>Last seen</th><th>Status</th><th>Dil</th>
           <th class="num">Products</th><th class="num">Alerts</th><th class="num">Messages</th>
           <th>Əməliyyat</th>
         </tr>
@@ -372,6 +372,7 @@
         statusTd.appendChild(off);
       }
       tr.appendChild(statusTd);
+      cell(tr, (u.language || 'az').toUpperCase());
       cell(tr, String(u.product_count || 0), 'num');
       cell(tr, String(u.notification_count || 0), 'num');
       cell(tr, String(u.message_count || 0), 'num');
@@ -394,7 +395,7 @@
       var detail = document.createElement('tr');
       detail.className = 'detail hidden';
       var detailCell = document.createElement('td');
-      detailCell.colSpan = 11;
+      detailCell.colSpan = 12;
       var holder = document.createElement('div');
       detailCell.appendChild(holder);
       detail.appendChild(detailCell);

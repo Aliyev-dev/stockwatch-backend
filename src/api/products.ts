@@ -4,6 +4,7 @@ import type { ProductInput, Repo } from '../db/repo';
 import type { UserRow } from '../db/types';
 import type { Notifier } from '../bot/notifier';
 import { renderChange, summariseChange } from '../bot/messages';
+import { normaliseLanguage } from '../bot/i18n';
 import type { ProductChange } from '../lib/product-changes';
 import { createLogger, describeError } from '../logger';
 import { extensionCors } from './extension-cors';
@@ -102,9 +103,10 @@ export function parseProducts(raw: unknown): ProductInput[] {
 }
 
 /**
- * Sends one alert per change, one after another. Sequential on purpose: a burst
- * of parallel sends to the same chat trips Telegram's flood control, and a user
- * who blocked the bot should stop the batch instead of failing 20 more times.
+ * Sends one alert per change, one after another, in the language the user picked
+ * in the bot. Sequential on purpose: a burst of parallel sends to the same chat
+ * trips Telegram's flood control, and a user who blocked the bot should stop the
+ * batch instead of failing 20 more times.
  */
 async function dispatchChanges(
   user: UserRow,
@@ -113,11 +115,12 @@ async function dispatchChanges(
   repo: Repo,
 ): Promise<number> {
   let delivered = 0;
+  const language = normaliseLanguage(user.language);
 
   for (const [index, change] of changes.slice(0, MAX_ALERTS_PER_SYNC).entries()) {
     if (index > 0) await sleep(DISPATCH_DELAY_MS);
 
-    const result = await notifier.sendToUser(user.chat_id, renderChange(change));
+    const result = await notifier.sendToUser(user.chat_id, renderChange(change, language));
     if (!result.ok) {
       if (result.unreachable) {
         log.warn(`chat ${user.chat_id} unreachable, dropping ${changes.length - index} remaining alerts`);

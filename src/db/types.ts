@@ -10,6 +10,8 @@ export type UserRow = {
   status: string;
   /** Admin on/off switch; false means every send path skips this user. */
   is_active: boolean;
+  /** Bot language chosen by the user: 'az' | 'en' | 'ru' | 'tr' | 'de'. */
+  language: string;
   joined_at: string;
   last_seen: string | null;
 };
@@ -68,11 +70,12 @@ export type Database = {
     Tables: {
       users: {
         Row: UserRow;
-        Insert: Omit<UserRow, 'id' | 'joined_at' | 'status' | 'is_active'> & {
+        Insert: Omit<UserRow, 'id' | 'joined_at' | 'status' | 'is_active' | 'language'> & {
           id?: string;
           joined_at?: string;
           status?: string;
           is_active?: boolean;
+          language?: string;
         };
         Update: Partial<Omit<UserRow, 'id'>>;
         Relationships: [];

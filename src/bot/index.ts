@@ -6,6 +6,7 @@ import type { UserRow } from '../db/types';
 import { createLogger, describeError } from '../logger';
 import { Notifier, escapeHtml, truncateForTelegram } from './notifier';
 import { ForwardIndex, buildMarker, parseMarker } from './reply-routing';
+import { isLanguage, languageKeyboard, normaliseLanguage, t, type Language } from './i18n';
 
 const log = createLogger('bot');
 
@@ -28,42 +29,6 @@ function displayName(user: { first_name?: string | null; username?: string | nul
   return `chat ${user.chat_id ?? 'unknown'}`;
 }
 
-function welcomeMessage(user: UserRow, isNew: boolean): string {
-  const greeting = isNew
-    ? `Welcome to <b>StockWatch</b>, ${escapeHtml(displayName(user))}!`
-    : `Welcome back, ${escapeHtml(displayName(user))}!`;
-  return [
-    greeting,
-    '',
-    'Your personal link code is:',
-    `<code>${escapeHtml(user.link_code)}</code>`,
-    '',
-    'Paste this code into the StockWatch extension settings to receive alerts here.',
-    '',
-    'Commands:',
-    '/code — show your link code again',
-    '/help — how this bot works',
-    '',
-    'Something not working? Just send me a message and it goes straight to support.',
-  ].join('\n');
-}
-
-function helpMessage(): string {
-  return [
-    '<b>StockWatch bot</b>',
-    '',
-    '1. Copy your link code with /code.',
-    '2. Paste it into the StockWatch extension settings.',
-    '3. Your price and stock alerts arrive in this chat.',
-    '',
-    '<b>Dəstək / Support</b>',
-    'Sualınızı və ya problemi elə bu çata yazın — mesajınız dəstək komandasına çatacaq,',
-    'cavab da bu çatda gələcək.',
-    '',
-    'Write your question here — it reaches our support team and the answer arrives in this chat.',
-  ].join('\n');
-}
-
 export function createBot(deps: BotDeps): BotService {
   const { config, repo } = deps;
   const bot = new Telegraf(config.telegramBotToken, { handlerTimeout: 30_000 });
@@ -71,6 +36,12 @@ export function createBot(deps: BotDeps): BotService {
   const forwardIndex = new ForwardIndex();
 
   const isAdminChat = (ctx: Context): boolean => ctx.chat?.id === config.adminChatId;
+
+  /**
+   * Deep-link payload (`https://t.me/<bot>?start=help`) parked until the user has
+   * picked a language, so the onboarding order stays: register -> language -> code.
+   */
+  const pendingPayload = new Map<number, string>();
 
   /** The optional support group; replies typed there are relayed to the user too. */
   const isSupportGroup = (ctx: Context): boolean =>
@@ -108,38 +79,147 @@ export function createBot(deps: BotDeps): BotService {
     }
   };
 
+  /** The user's language, defaulting to Azerbaijani for anything unknown. */
+  const languageOf = (user: UserRow): Language => normaliseLanguage(user.language);
+
+  /** Reads the language of a chat we only know by id (support replies). */
+  const languageOfChat = async (chatId: number): Promise<Language> => {
+    try {
+      const user = await repo.findUserByChatId(chatId);
+      return user ? languageOf(user) : normaliseLanguage(null);
+    } catch (err) {
+      log.warn(`could not read language for chat ${chatId}: ${describeError(err)}`);
+      return normaliseLanguage(null);
+    }
+  };
+
+  /** The five-language picker, shown on /start and on /language. */
+  const askForLanguage = async (ctx: Context, lang: Language): Promise<void> => {
+    try {
+      await ctx.reply(t(lang, 'lang_prompt'), {
+        reply_markup: { inline_keyboard: languageKeyboard() },
+      });
+    } catch (err) {
+      log.warn(`language prompt to chat ${ctx.chat?.id ?? 'unknown'} failed: ${describeError(err)}`);
+    }
+  };
+
+  /** Welcome + link code, sent once the language is settled. */
+  const sendOnboarding = async (chatId: number, user: UserRow): Promise<void> => {
+    const lang = languageOf(user);
+    await notifier.sendToUser(
+      chatId,
+      `${t(lang, 'welcome')}\n\n${t(lang, 'link_code_info', escapeHtml(user.link_code))}`,
+    );
+
+    // A deep link such as ?start=help asked for the support flow; honour it now
+    // that onboarding is done.
+    const payload = pendingPayload.get(chatId);
+    pendingPayload.delete(chatId);
+    if (payload === 'help') {
+      await notifier.sendToUser(chatId, t(lang, 'help_prompt'));
+    }
+  };
+
   // --- /start -------------------------------------------------------------
   bot.start(async (ctx) => {
     const result = await registerUser(ctx);
     if (!result) {
-      await safeReply(ctx, 'Sorry — registration is temporarily unavailable. Please try /start again in a minute.');
+      await safeReply(ctx, t(null, 'error_generic'));
       return;
     }
+
+    const payload = typeof ctx.payload === 'string' ? ctx.payload.trim() : '';
+    if (payload !== '' && ctx.chat) {
+      // Only the support deep link is acted on. A link code in the payload is
+      // ignored on purpose: rebinding an account from a URL would let anyone
+      // claim someone else's code.
+      if (payload.toLowerCase() === 'help') pendingPayload.set(ctx.chat.id, 'help');
+      else log.info(`ignoring unrecognised start payload from chat ${result.user.chat_id}`);
+    }
+
     log.info(`${result.created ? 'registered' : 'returning'} user chat ${result.user.chat_id} (${result.user.link_code})`);
-    await safeReply(ctx, welcomeMessage(result.user, result.created));
+    await askForLanguage(ctx, languageOf(result.user));
+  });
+
+  // --- language picker button ---------------------------------------------
+  bot.action(/^setlang:(\w{2})$/, async (ctx) => {
+    const chatId = ctx.chat?.id;
+    const chosen = ctx.match[1];
+
+    if (chatId === undefined || !isLanguage(chosen)) {
+      try {
+        await ctx.answerCbQuery();
+      } catch (err) {
+        log.warn(`answerCbQuery failed: ${describeError(err)}`);
+      }
+      return;
+    }
+
+    let user: UserRow | null = null;
+    try {
+      user = await repo.setUserLanguage(chatId, chosen);
+    } catch (err) {
+      log.error(`failed to store language ${chosen} for chat ${chatId}: ${describeError(err)}`);
+    }
+
+    // A user who somehow has no row yet (a very old chat, a wiped table) is
+    // registered here rather than being left without a code.
+    if (!user) {
+      const fallback = await registerUser(ctx);
+      if (fallback) {
+        try {
+          user = (await repo.setUserLanguage(chatId, chosen)) ?? fallback.user;
+        } catch {
+          user = fallback.user;
+        }
+      }
+    }
+
+    try {
+      await ctx.answerCbQuery();
+    } catch (err) {
+      log.warn(`answerCbQuery failed for chat ${chatId}: ${describeError(err)}`);
+    }
+
+    if (!user) {
+      await safeReply(ctx, t(chosen, 'error_generic'));
+      return;
+    }
+
+    try {
+      await ctx.editMessageText(t(chosen, 'lang_set'), { parse_mode: 'HTML' });
+    } catch (err) {
+      // The message may be too old to edit, or unchanged; say it plainly instead.
+      log.debug(`editMessageText failed for chat ${chatId}: ${describeError(err)}`);
+      await safeReply(ctx, t(chosen, 'lang_set'));
+    }
+
+    log.info(`chat ${chatId} chose language ${chosen}`);
+    await sendOnboarding(chatId, user);
+  });
+
+  // --- /language ----------------------------------------------------------
+  bot.command('language', async (ctx) => {
+    const result = await registerUser(ctx);
+    await askForLanguage(ctx, result ? languageOf(result.user) : normaliseLanguage(null));
   });
 
   // --- /code --------------------------------------------------------------
   bot.command('code', async (ctx) => {
     const result = await registerUser(ctx);
     if (!result) {
-      await safeReply(ctx, 'Sorry — I could not read your link code right now. Please try again in a minute.');
+      await safeReply(ctx, t(null, 'error_generic'));
       return;
     }
-    await safeReply(
-      ctx,
-      [
-        'Your StockWatch link code:',
-        `<code>${escapeHtml(result.user.link_code)}</code>`,
-        '',
-        'Paste this code into the StockWatch extension settings to receive alerts here.',
-      ].join('\n'),
-    );
+    await safeReply(ctx, t(languageOf(result.user), 'code_reminder', escapeHtml(result.user.link_code)));
   });
 
   // --- /help --------------------------------------------------------------
   bot.command('help', async (ctx) => {
-    await safeReply(ctx, helpMessage());
+    const result = await registerUser(ctx);
+    const lang = result ? languageOf(result.user) : normaliseLanguage(null);
+    await safeReply(ctx, `${t(lang, 'help_body')}\n\n${t(lang, 'help_prompt')}`);
   });
 
   // --- /reply <chat_id> <text> (admin chat only) --------------------------
@@ -161,7 +241,11 @@ export function createBot(deps: BotDeps): BotService {
       await safeReply(ctx, 'That does not look like a valid chat id.');
       return;
     }
-    const result = await notifier.sendToUser(userChatId, `<b>StockWatch support</b>\n\n${escapeHtml(text)}`);
+    const lang = await languageOfChat(userChatId);
+    const result = await notifier.sendToUser(
+      userChatId,
+      `<b>${t(lang, 'support_reply_prefix')}</b>\n\n${escapeHtml(text)}`,
+    );
     if (!result.ok) {
       await safeReply(
         ctx,
@@ -247,7 +331,9 @@ export function createBot(deps: BotDeps): BotService {
     const text = ctx.message.text;
     if (text.startsWith('/')) {
       // An unknown command: nudge the user rather than forwarding it as a report.
-      if (!isStaffChat(ctx)) await safeReply(ctx, 'Unknown command. Try /code or /help.');
+      if (!isStaffChat(ctx)) {
+        await safeReply(ctx, t(await languageOfChat(ctx.chat?.id ?? 0), 'unknown_command'));
+      }
       return;
     }
 
@@ -280,7 +366,7 @@ export function createBot(deps: BotDeps): BotService {
 
     const result = await registerUser(ctx);
     if (!result) {
-      await safeReply(ctx, 'Sorry — I could not save your message. Please try again in a minute.');
+      await safeReply(ctx, t(null, 'error_generic'));
       return;
     }
 
@@ -292,10 +378,7 @@ export function createBot(deps: BotDeps): BotService {
 
     await recordSupportMessage(result.user, text);
     await forwardToSupport(result.user, text);
-    await safeReply(
-      ctx,
-      'Təşəkkürlər — mesajınız dəstək komandasına çatdı. Cavab elə bu çatda gələcək. ✅',
-    );
+    await safeReply(ctx, t(languageOf(result.user), 'help_sent'));
   });
 
   // --- anything else (photos, stickers, voice, ...) -----------------------
@@ -312,7 +395,7 @@ export function createBot(deps: BotDeps): BotService {
       await recordSupportMessage(result.user, note);
       await forwardToSupport(result.user, note);
     }
-    await safeReply(ctx, 'I can only read text messages. Please describe the problem in words.');
+    await safeReply(ctx, t(await languageOfChat(ctx.chat?.id ?? 0), 'text_only'));
   });
 
   // A handler that throws must never take the polling loop down with it.
@@ -329,6 +412,7 @@ export function createBot(deps: BotDeps): BotService {
         { command: 'start', description: 'Qeydiyyat və link kodu / Register' },
         { command: 'code', description: 'Link kodumu göstər / Show my link code' },
         { command: 'help', description: 'Kömək və dəstək / Help and support' },
+        { command: 'language', description: 'Dili dəyiş / Change language' },
       ]);
       // `launch()` only resolves when polling stops, so we start it in the
       // background and surface startup failures through the error log.
