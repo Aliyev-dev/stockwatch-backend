@@ -328,8 +328,21 @@ the user is sent a Telegram message for each change:
 | In stock → out of stock | `❌ Məhsul stokda yoxdur` with the last known price |
 | Quantity moved | `📉 Stok azaldı` / `📈 Stok artdı`, flagged when at or below the threshold |
 
+How the two signals are read:
+
+- **Availability text wins over the count.** `status` is what the page actually says (in any
+  marketplace language — `Derzeit nicht verfügbar`, `Нет в наличии`, `Stokta yok`, …). The
+  `quantity` only decides when `status` says nothing recognisable. A client that cannot read
+  a number tends to send `0`, and trusting that over an explicit "in stock" produced false
+  "out of stock" alerts.
+- **Only a real count is reported.** `0`, a negative or a missing `quantity` means "no count
+  available", so no quantity alert is raised and no number is printed — the message says the
+  product is in stock without inventing a figure.
+- **Every message links to the product**, so the reported figure can be checked in one tap.
+
 Prices are compared as **numbers**, never as strings, so `$9.99 → $10.50` and `1.234,56 € →
-999,00 €` are both read correctly. A price that cannot be parsed (or is missing) is printed
+999,00 €` are both read correctly. When the two prices are in different currencies the change
+is still reported, but without a difference — subtracting across currencies is meaningless. A price that cannot be parsed (or is missing) is printed
 as *Qiymət məlum deyil* rather than left blank. A product seen for the first time is stored
 silently — there is nothing to compare it against yet. Alerts go out one after another with a
 short pause, so a big batch does not trip Telegram's flood control.
@@ -462,6 +475,8 @@ src/
   lib/
     price.ts            price parsing (numeric compare) and stock-state reading
     product-changes.ts  diffing a stored product against the reported one
+    product-url.ts      product link used in every alert
+    language-cache.ts   last language a chat picked, when the stored one is missing
   api/
     server.ts           Express app, security headers, error handling
     notify.ts           POST /api/notify
@@ -522,6 +537,7 @@ scripts/copy-assets.js  copies panel.html into dist/ during build
 | `/api/notify` returns `410` | The user blocked the bot. |
 | `/api/products/sync` returns `400` | The message names the offending field, e.g. `"products[2].asin" must not be empty.` |
 | Replies in the support group do nothing | The bot must be a member of that group and `SUPPORT_GROUP_ID` must match it. Reply **to the bot's forwarded post**, not to an unrelated message. |
+| A reported quantity looks wrong | The figure comes from the extension, not from here. Check the QTY column in the admin panel: it is exactly what was received. The Render log has one line per alert (`chat 42 B0…@amazon.de: …`), and `LOG_LEVEL=debug` logs the whole payload. |
 | Alerts arrive in the wrong language | The user can run `/language`; the admin panel's DIL column shows what is stored. |
 | A user gets no alerts at all | Check the panel: they may be deactivated (`is_active = false`) or `blocked`. |
 | `/api/products/sync` returns `"active": false` | The admin deactivated that user; nothing is sent until they are activated again. |

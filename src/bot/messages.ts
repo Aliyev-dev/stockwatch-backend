@@ -1,6 +1,6 @@
 import { escapeHtml } from './notifier';
 import { t, type Language } from './i18n';
-import { formatAmount } from '../lib/price';
+import { formatAmount, usableQuantity } from '../lib/price';
 import { productUrl } from '../lib/product-url';
 import type { ProductChange, ProductIdentity } from '../lib/product-changes';
 
@@ -35,12 +35,6 @@ function linkLine(product: ProductIdentity, lang: Language): string {
   return `\n\n<a href="${escapeHtml(url)}">${t(lang, 'open_product')}</a>`;
 }
 
-/** Only a real, positive count is reported; anything else is left unsaid. */
-function usableQuantity(quantity: number | null): number | null {
-  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return null;
-  return Math.trunc(quantity);
-}
-
 /** Full Telegram body for one change, in the user's language. */
 export function renderChange(change: ProductChange, lang: Language): string {
   const name = titleOf(change.product);
@@ -73,7 +67,8 @@ export function renderChange(change: ProductChange, lang: Language): string {
 
     case 'price': {
       const dropped = change.direction === 'down';
-      const delta = formatAmount(Math.abs(change.delta), change.newPrice);
+      // Across currencies the difference is not a number worth printing.
+      const delta = change.comparable ? formatAmount(Math.abs(change.delta), change.newPrice) : '';
       return (
         t(
           lang,

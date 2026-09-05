@@ -74,7 +74,14 @@ export function formatAmount(amount: number, like: string | null | undefined): s
 
 export type StockState = 'in_stock' | 'out_of_stock' | 'unknown';
 
+/**
+ * Checked before the positive hints, so "out of stock" is never read as "stock"
+ * and "nicht verfügbar" is never read as "verfügbar". Amazon serves the
+ * availability text in the marketplace's own language, so the domains this
+ * project watches are all covered.
+ */
 const OUT_OF_STOCK_HINTS = [
+  // en
   'out of stock',
   'out_of_stock',
   'outofstock',
@@ -84,41 +91,93 @@ const OUT_OF_STOCK_HINTS = [
   'soldout',
   'no stock',
   'nostock',
+  'currently unavailable',
+  // az
   'stokda yoxdur',
   'yoxdur',
   'bitib',
+  // tr
+  'stokta yok',
+  'tükendi',
+  // de
+  'nicht verfügbar',
+  'nicht auf lager',
+  'derzeit nicht',
+  'ausverkauft',
+  // ru
+  'нет в наличии',
+  'нет на складе',
+  'закончился',
+  // fr / es / it
+  'non disponible',
+  'rupture de stock',
+  'no disponible',
+  'agotado',
+  'non disponibile',
+  'esaurito',
 ];
 
 const IN_STOCK_HINTS = [
+  // en
   'in stock',
   'in_stock',
   'instock',
   'available',
+  // az
   'stokda var',
   'stokda',
-  'var',
   'mövcuddur',
+  'var',
+  // tr
+  'stokta',
+  // de
+  'auf lager',
+  'verfügbar',
+  'lieferbar',
+  // ru
+  'в наличии',
+  'на складе',
+  // fr / es / it
+  'en stock',
+  'disponible',
+  'disponibile',
 ];
+
+/** Reads the availability text alone; null when it says nothing recognisable. */
+function stateFromStatus(status: string | null | undefined): StockState | null {
+  if (typeof status !== 'string') return null;
+  const normalised = status.trim().toLowerCase().replace(/[-_]+/g, ' ');
+  if (normalised === '') return null;
+
+  if (normalised === 'false' || normalised === '0' || normalised === 'no') return 'out_of_stock';
+  if (normalised === 'true' || normalised === '1' || normalised === 'yes') return 'in_stock';
+  if (OUT_OF_STOCK_HINTS.some((hint) => normalised.includes(hint.replace(/[-_]+/g, ' ')))) return 'out_of_stock';
+  if (IN_STOCK_HINTS.some((hint) => normalised.includes(hint.replace(/[-_]+/g, ' ')))) return 'in_stock';
+  return null;
+}
 
 /**
  * Works out whether a product is buyable from whatever the extension reported.
- * Quantity wins when present; otherwise the status text is matched, negatives
- * first so that "out_of_stock" is never read as "stock".
+ *
+ * The availability TEXT wins, because that is what the page actually says. The
+ * quantity only decides when the text is missing or unrecognisable: a count is
+ * frequently absent from the page, and a client that cannot read one tends to
+ * send 0 — trusting that number over an explicit "in stock" produced false
+ * "out of stock" alerts.
  */
 export function stockStateOf(status: string | null | undefined, quantity: number | null | undefined): StockState {
+  const fromStatus = stateFromStatus(status);
+  if (fromStatus !== null) return fromStatus;
+
   if (typeof quantity === 'number' && Number.isFinite(quantity)) {
     return quantity > 0 ? 'in_stock' : 'out_of_stock';
   }
 
-  if (typeof status === 'string') {
-    const normalised = status.trim().toLowerCase().replace(/[-_]+/g, ' ');
-    if (normalised !== '') {
-      if (normalised === 'false' || normalised === '0') return 'out_of_stock';
-      if (normalised === 'true' || normalised === '1') return 'in_stock';
-      if (OUT_OF_STOCK_HINTS.some((hint) => normalised.includes(hint.replace(/[-_]+/g, ' ')))) return 'out_of_stock';
-      if (IN_STOCK_HINTS.some((hint) => normalised.includes(hint.replace(/[-_]+/g, ' ')))) return 'in_stock';
-    }
-  }
-
   return 'unknown';
+}
+
+/** A count worth showing: a real, positive number. Anything else is "unknown". */
+export function usableQuantity(quantity: number | null | undefined): number | null {
+  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return null;
+  return Math.trunc(quantity);
 }

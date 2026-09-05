@@ -1,6 +1,6 @@
 import type { ProductInput } from '../db/repo';
 import type { ProductRow } from '../db/types';
-import { parsePrice, stockStateOf, type StockState } from './price';
+import { currencyOf, parsePrice, stockStateOf, usableQuantity, type StockState } from './price';
 
 /**
  * Diffing a stored product against the state the extension just reported.
@@ -22,6 +22,8 @@ export interface PriceChange {
   newValue: number;
   /** Positive when the price went up, negative when it dropped. */
   delta: number;
+  /** False when the two prices are quoted in different currencies, which makes the delta meaningless. */
+  comparable: boolean;
   direction: 'up' | 'down';
   /** Current stock, for context in the message. */
   stock: StockState;
@@ -76,23 +78,24 @@ export function diffProduct(previous: ProductRow, next: ProductInput): ProductCh
     changes.push({ kind: 'back_in_stock', product, quantity: next.quantity, price: next.price });
   } else if (previousStock === 'in_stock' && nextStock === 'out_of_stock') {
     changes.push({ kind: 'out_of_stock', product, quantity: next.quantity, price: next.price });
-  } else if (
-    previousStock === 'in_stock' &&
-    nextStock === 'in_stock' &&
-    typeof previous.last_quantity === 'number' &&
-    typeof next.quantity === 'number' &&
-    previous.last_quantity !== next.quantity
-  ) {
-    changes.push({
-      kind: 'quantity',
-      product,
-      oldQuantity: previous.last_quantity,
-      newQuantity: next.quantity,
-      direction: next.quantity > previous.last_quantity ? 'up' : 'down',
-      belowThreshold: typeof next.threshold === 'number' && next.quantity <= next.threshold,
-      threshold: next.threshold,
-      price: next.price,
-    });
+  } else if (previousStock === 'in_stock' && nextStock === 'in_stock') {
+    // Only real counts are compared. A 0 (or a missing number) means "no count
+    // reported", not "none left" — reporting "12 -> 0" from that would be wrong.
+    const oldQuantity = usableQuantity(previous.last_quantity);
+    const newQuantity = usableQuantity(next.quantity);
+
+    if (oldQuantity !== null && newQuantity !== null && oldQuantity !== newQuantity) {
+      changes.push({
+        kind: 'quantity',
+        product,
+        oldQuantity,
+        newQuantity,
+        direction: newQuantity > oldQuantity ? 'up' : 'down',
+        belowThreshold: typeof next.threshold === 'number' && newQuantity <= next.threshold,
+        threshold: next.threshold,
+        price: next.price,
+      });
+    }
   }
 
   // --- price change (either direction) ------------------------------------
@@ -105,6 +108,12 @@ export function diffProduct(previous: ProductRow, next: ProductInput): ProductCh
     next.price !== null &&
     Math.abs(newValue - oldValue) > PRICE_EPSILON
   ) {
+    // A switch of currency (a different marketplace, a changed locale) makes the
+    // subtraction meaningless, so the change is still reported but without a delta.
+    const oldCurrency = currencyOf(previous.last_price);
+    const newCurrency = currencyOf(next.price);
+    const comparable = oldCurrency === null || newCurrency === null || oldCurrency === newCurrency;
+
     changes.push({
       kind: 'price',
       product,
@@ -113,6 +122,7 @@ export function diffProduct(previous: ProductRow, next: ProductInput): ProductCh
       oldValue,
       newValue,
       delta: newValue - oldValue,
+      comparable,
       direction: newValue > oldValue ? 'up' : 'down',
       stock: nextStock,
       quantity: next.quantity,
