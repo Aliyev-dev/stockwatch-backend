@@ -6,7 +6,7 @@ import type { UserRow } from '../db/types';
 import { createLogger, describeError } from '../logger';
 import { Notifier, escapeHtml, truncateForTelegram } from './notifier';
 import { ForwardIndex, buildMarker, parseMarker } from './reply-routing';
-import { isLanguage, languageKeyboard, normaliseLanguage, t, type Language } from './i18n';
+import { DEFAULT_LANGUAGE, isLanguage, languageKeyboard, normaliseLanguage, t, type Language } from './i18n';
 
 const log = createLogger('bot');
 
@@ -93,8 +93,12 @@ export function createBot(deps: BotDeps): BotService {
     }
   };
 
-  /** The five-language picker, shown on /start and on /language. */
-  const askForLanguage = async (ctx: Context, lang: Language): Promise<void> => {
+  /**
+   * The five-language picker, shown on /start and on /language. The prompt text
+   * is identical in every language, so it can go out before the database is
+   * touched — the keyboard appears instantly.
+   */
+  const askForLanguage = async (ctx: Context, lang: Language = DEFAULT_LANGUAGE): Promise<void> => {
     try {
       await ctx.reply(t(lang, 'lang_prompt'), {
         reply_markup: { inline_keyboard: languageKeyboard() },
@@ -123,23 +127,27 @@ export function createBot(deps: BotDeps): BotService {
 
   // --- /start -------------------------------------------------------------
   bot.start(async (ctx) => {
-    const result = await registerUser(ctx);
-    if (!result) {
-      await safeReply(ctx, t(null, 'error_generic'));
-      return;
-    }
-
+    // Parked before anything is awaited, so it is already there even if the user
+    // taps a language button immediately.
     const payload = typeof ctx.payload === 'string' ? ctx.payload.trim() : '';
     if (payload !== '' && ctx.chat) {
       // Only the support deep link is acted on. A link code in the payload is
       // ignored on purpose: rebinding an account from a URL would let anyone
       // claim someone else's code.
       if (payload.toLowerCase() === 'help') pendingPayload.set(ctx.chat.id, 'help');
-      else log.info(`ignoring unrecognised start payload from chat ${result.user.chat_id}`);
+      else log.info(`ignoring unrecognised start payload from chat ${ctx.chat.id}`);
     }
 
+    // Keyboard first, registration after: the user sees the picker without
+    // waiting for the database.
+    await askForLanguage(ctx);
+
+    const result = await registerUser(ctx);
+    if (!result) {
+      await safeReply(ctx, t(null, 'error_generic'));
+      return;
+    }
     log.info(`${result.created ? 'registered' : 'returning'} user chat ${result.user.chat_id} (${result.user.link_code})`);
-    await askForLanguage(ctx, languageOf(result.user));
   });
 
   // --- language picker button ---------------------------------------------
@@ -147,14 +155,16 @@ export function createBot(deps: BotDeps): BotService {
     const chatId = ctx.chat?.id;
     const chosen = ctx.match[1];
 
-    if (chatId === undefined || !isLanguage(chosen)) {
-      try {
-        await ctx.answerCbQuery();
-      } catch (err) {
-        log.warn(`answerCbQuery failed: ${describeError(err)}`);
-      }
-      return;
+    // FIRST, before any database work: Telegram spins the button's loading
+    // indicator until the callback query is answered, so acknowledging it up
+    // front is what makes the tap feel instant.
+    try {
+      await ctx.answerCbQuery();
+    } catch (err) {
+      log.warn(`answerCbQuery failed for chat ${chatId ?? 'unknown'}: ${describeError(err)}`);
     }
+
+    if (chatId === undefined || !isLanguage(chosen)) return;
 
     let user: UserRow | null = null;
     try {
@@ -176,12 +186,6 @@ export function createBot(deps: BotDeps): BotService {
       }
     }
 
-    try {
-      await ctx.answerCbQuery();
-    } catch (err) {
-      log.warn(`answerCbQuery failed for chat ${chatId}: ${describeError(err)}`);
-    }
-
     if (!user) {
       await safeReply(ctx, t(chosen, 'error_generic'));
       return;
@@ -201,8 +205,9 @@ export function createBot(deps: BotDeps): BotService {
 
   // --- /language ----------------------------------------------------------
   bot.command('language', async (ctx) => {
-    const result = await registerUser(ctx);
-    await askForLanguage(ctx, result ? languageOf(result.user) : normaliseLanguage(null));
+    await askForLanguage(ctx);
+    // Refreshes the row (and last_seen) once the keyboard is already on screen.
+    await registerUser(ctx);
   });
 
   // --- /code --------------------------------------------------------------
