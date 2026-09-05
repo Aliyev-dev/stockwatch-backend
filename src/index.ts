@@ -88,6 +88,19 @@ async function main(): Promise<void> {
     );
   }
 
+  // A missing language column is not fatal — the bot keeps working in the
+  // default language — but it is invisible unless we say so here.
+  try {
+    if (!(await repo.languageColumnAvailable())) {
+      logger.error(
+        'users.language column is MISSING: every user will receive the default language (az) ' +
+          'no matter what they pick. Run migration_language.sql in the Supabase SQL editor.',
+      );
+    }
+  } catch (err) {
+    logger.warn(`could not verify the users.language column: ${describeError(err)}`);
+  }
+
   const app = createServer({ config, repo, notifier: botService.notifier });
 
   let server: Server;

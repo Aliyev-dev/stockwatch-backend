@@ -7,6 +7,7 @@ import { createLogger, describeError } from '../logger';
 import { Notifier, escapeHtml, truncateForTelegram } from './notifier';
 import { ForwardIndex, buildMarker, parseMarker } from './reply-routing';
 import { DEFAULT_LANGUAGE, isLanguage, languageKeyboard, normaliseLanguage, t, type Language } from './i18n';
+import { rememberLanguage, resolveLanguage } from '../lib/language-cache';
 
 const log = createLogger('bot');
 
@@ -80,16 +81,16 @@ export function createBot(deps: BotDeps): BotService {
   };
 
   /** The user's language, defaulting to Azerbaijani for anything unknown. */
-  const languageOf = (user: UserRow): Language => normaliseLanguage(user.language);
+  const languageOf = (user: UserRow): Language => resolveLanguage(user.chat_id, user.language);
 
   /** Reads the language of a chat we only know by id (support replies). */
   const languageOfChat = async (chatId: number): Promise<Language> => {
     try {
       const user = await repo.findUserByChatId(chatId);
-      return user ? languageOf(user) : normaliseLanguage(null);
+      return user ? languageOf(user) : resolveLanguage(chatId, null);
     } catch (err) {
       log.warn(`could not read language for chat ${chatId}: ${describeError(err)}`);
-      return normaliseLanguage(null);
+      return resolveLanguage(chatId, null);
     }
   };
 
@@ -108,9 +109,14 @@ export function createBot(deps: BotDeps): BotService {
     }
   };
 
-  /** Welcome + link code, sent once the language is settled. */
-  const sendOnboarding = async (chatId: number, user: UserRow): Promise<void> => {
-    const lang = languageOf(user);
+  /**
+   * Welcome + link code, sent once the language is settled.
+   *
+   * `lang` is what the user actually tapped. It is passed in rather than read
+   * back from the row so the messages are right even when the database write did
+   * not stick (missing column, stale schema cache).
+   */
+  const sendOnboarding = async (chatId: number, user: UserRow, lang: Language): Promise<void> => {
     await notifier.sendToUser(
       chatId,
       `${t(lang, 'welcome')}\n\n${t(lang, 'link_code_info', escapeHtml(user.link_code))}`,
@@ -166,11 +172,19 @@ export function createBot(deps: BotDeps): BotService {
 
     if (chatId === undefined || !isLanguage(chosen)) return;
 
+    // Remembered before the write, so every message in this flow — and every
+    // later one this process handles — uses the language that was tapped, even
+    // if storing it fails.
+    rememberLanguage(chatId, chosen);
+
     let user: UserRow | null = null;
     try {
       user = await repo.setUserLanguage(chatId, chosen);
     } catch (err) {
-      log.error(`failed to store language ${chosen} for chat ${chatId}: ${describeError(err)}`);
+      log.error(
+        `failed to store language ${chosen} for chat ${chatId}: ${describeError(err)}. ` +
+          'If this says the column does not exist, run migration_language.sql in the Supabase SQL editor.',
+      );
     }
 
     // A user who somehow has no row yet (a very old chat, a wiped table) is
@@ -200,7 +214,7 @@ export function createBot(deps: BotDeps): BotService {
     }
 
     log.info(`chat ${chatId} chose language ${chosen}`);
-    await sendOnboarding(chatId, user);
+    await sendOnboarding(chatId, user, chosen);
   });
 
   // --- /language ----------------------------------------------------------

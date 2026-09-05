@@ -187,6 +187,19 @@ export class Repo {
     return data ?? null;
   }
 
+  /**
+   * Whether `users.language` exists and is readable. Used at startup to warn
+   * loudly when migration_language.sql has not been run yet — without it every
+   * user silently falls back to the default language.
+   */
+  async languageColumnAvailable(): Promise<boolean> {
+    const { error } = await this.db.from('users').select('language').limit(1);
+    if (!error) return true;
+    // 42703 = undefined_column; PGRST204 = column not in the schema cache.
+    if (error.code === '42703' || error.code === 'PGRST204' || /language/i.test(error.message)) return false;
+    throw new DbError('languageColumnAvailable', error);
+  }
+
   /** Stores the language the user picked in the bot. */
   async setUserLanguage(chatId: number, language: Language): Promise<UserRow | null> {
     const { data, error } = await this.db

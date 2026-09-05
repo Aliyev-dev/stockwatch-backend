@@ -4,7 +4,7 @@ import type { ProductInput, Repo } from '../db/repo';
 import type { UserRow } from '../db/types';
 import type { Notifier } from '../bot/notifier';
 import { renderChange, summariseChange } from '../bot/messages';
-import { normaliseLanguage } from '../bot/i18n';
+import { resolveLanguage } from '../lib/language-cache';
 import type { ProductChange } from '../lib/product-changes';
 import { createLogger, describeError } from '../logger';
 import { extensionCors } from './extension-cors';
@@ -115,7 +115,7 @@ async function dispatchChanges(
   repo: Repo,
 ): Promise<number> {
   let delivered = 0;
-  const language = normaliseLanguage(user.language);
+  const language = resolveLanguage(user.chat_id, user.language);
 
   for (const [index, change] of changes.slice(0, MAX_ALERTS_PER_SYNC).entries()) {
     if (index > 0) await sleep(DISPATCH_DELAY_MS);

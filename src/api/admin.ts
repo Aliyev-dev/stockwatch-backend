@@ -3,7 +3,8 @@ import type { Config } from '../config';
 import type { Repo } from '../db/repo';
 import type { Notifier } from '../bot/notifier';
 import { escapeHtml } from '../bot/notifier';
-import { normaliseLanguage, t } from '../bot/i18n';
+import { t } from '../bot/i18n';
+import { resolveLanguage } from '../lib/language-cache';
 import { createLogger, describeError } from '../logger';
 import { ADMIN_COOKIE, adminCookieOptions, requireAdmin, tokensMatch } from './auth';
 import { RateLimiter } from './rate-limit';
@@ -168,10 +169,10 @@ export function createAdminRouter(deps: { config: Config; repo: Repo; notifier: 
     }
 
     // Answer the user in the language they picked in the bot.
-    let language = normaliseLanguage(null);
+    let language = resolveLanguage(thread.chat_id, null);
     try {
       const user = await repo.findUserByChatId(thread.chat_id);
-      language = normaliseLanguage(user?.language);
+      language = resolveLanguage(thread.chat_id, user?.language);
     } catch (err) {
       log.warn(`could not read language for chat ${thread.chat_id}: ${describeError(err)}`);
     }
