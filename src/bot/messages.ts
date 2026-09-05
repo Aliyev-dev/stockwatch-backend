@@ -1,6 +1,7 @@
 import { escapeHtml } from './notifier';
 import { t, type Language } from './i18n';
 import { formatAmount } from '../lib/price';
+import { productUrl } from '../lib/product-url';
 import type { ProductChange, ProductIdentity } from '../lib/product-changes';
 
 /**
@@ -24,43 +25,65 @@ export function priceText(price: string | null | undefined, lang: Language): str
   return `<b>${escapeHtml(price.trim())}</b>`;
 }
 
+/**
+ * Link to the product page, so the reported figure can be checked immediately.
+ * Omitted when the ASIN or the domain does not look usable.
+ */
+function linkLine(product: ProductIdentity, lang: Language): string {
+  const url = productUrl(product.asin, product.domain);
+  if (!url) return '';
+  return `\n\n<a href="${escapeHtml(url)}">${t(lang, 'open_product')}</a>`;
+}
+
+/** Only a real, positive count is reported; anything else is left unsaid. */
+function usableQuantity(quantity: number | null): number | null {
+  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return null;
+  return Math.trunc(quantity);
+}
+
 /** Full Telegram body for one change, in the user's language. */
 export function renderChange(change: ProductChange, lang: Language): string {
   const name = titleOf(change.product);
+  const link = linkLine(change.product, lang);
 
   switch (change.kind) {
-    case 'back_in_stock':
-      return t(
-        lang,
-        'back_in_stock',
-        name,
-        change.quantity === null ? '—' : change.quantity,
-        priceText(change.price, lang),
-      );
+    case 'back_in_stock': {
+      const qty = usableQuantity(change.quantity);
+      // No quantity reported: say it is back in stock without inventing a number.
+      const body =
+        qty === null
+          ? t(lang, 'back_in_stock_no_qty', name, priceText(change.price, lang))
+          : t(lang, 'back_in_stock', name, qty, priceText(change.price, lang));
+      return body + link;
+    }
 
     case 'out_of_stock':
-      return t(lang, 'out_of_stock', name);
+      return t(lang, 'out_of_stock', name) + link;
 
     case 'quantity': {
       const key = change.direction === 'up' ? 'stock_increase' : 'stock_decrease';
-      const body = t(lang, key, name, change.newQuantity, priceText(change.price, lang));
-      if (change.belowThreshold && change.threshold !== null) {
-        return `${body}\n${t(lang, 'below_threshold', change.threshold)}`;
-      }
-      return body;
+      // Both figures are shown: a misread count is obvious next to the old one.
+      const body = t(lang, key, name, change.oldQuantity, change.newQuantity, priceText(change.price, lang));
+      const warning =
+        change.belowThreshold && change.threshold !== null
+          ? `\n${t(lang, 'below_threshold', change.threshold)}`
+          : '';
+      return body + warning + link;
     }
 
     case 'price': {
       const dropped = change.direction === 'down';
       const delta = formatAmount(Math.abs(change.delta), change.newPrice);
-      return t(
-        lang,
-        'price_change',
-        name,
-        escapeHtml(change.oldPrice.trim()),
-        escapeHtml(change.newPrice.trim()),
-        dropped,
-        escapeHtml(delta),
+      return (
+        t(
+          lang,
+          'price_change',
+          name,
+          escapeHtml(change.oldPrice.trim()),
+          escapeHtml(change.newPrice.trim()),
+          dropped,
+          escapeHtml(delta),
+        ) + link
       );
     }
   }

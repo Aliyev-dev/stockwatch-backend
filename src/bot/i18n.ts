@@ -51,10 +51,15 @@ interface Dictionary {
   support_reply_prefix: string;
   price_unknown: string;
   below_threshold: (threshold: number) => string;
-  stock_increase: (name: string, qty: number | string, price: string) => string;
-  stock_decrease: (name: string, qty: number | string, price: string) => string;
+  /** Link label under every product message. */
+  open_product: string;
+  /** Both numbers are shown, so a wrong reading is obvious at a glance. */
+  stock_increase: (name: string, oldQty: number | string, newQty: number | string, price: string) => string;
+  stock_decrease: (name: string, oldQty: number | string, newQty: number | string, price: string) => string;
   out_of_stock: (name: string) => string;
   back_in_stock: (name: string, qty: number | string, price: string) => string;
+  /** Used when the extension reported no usable quantity: no number is invented. */
+  back_in_stock_no_qty: (name: string, price: string) => string;
   price_change: (name: string, oldPrice: string, newPrice: string, dropped: boolean, delta: string) => string;
 }
 
@@ -101,10 +106,14 @@ const az: Dictionary = {
   support_reply_prefix: 'StockWatch dəstək',
   price_unknown: 'Qiymət məlum deyil',
   below_threshold: (threshold) => `⚠️ Həddən aşağıdır (hədd: ${threshold})`,
-  stock_increase: (name, qty, price) => `📈 <b>${name}</b>\nStok artdı: ${qty} ədəd\nQiymət: ${price}`,
-  stock_decrease: (name, qty, price) => `📉 <b>${name}</b>\nStok azaldı: ${qty} ədəd\nQiymət: ${price}`,
+  open_product: 'Məhsula bax',
+  stock_increase: (name, oldQty, newQty, price) =>
+    `📈 <b>${name}</b>\nStok artdı: ${oldQty} → ${newQty} ədəd\nQiymət: ${price}`,
+  stock_decrease: (name, oldQty, newQty, price) =>
+    `📉 <b>${name}</b>\nStok azaldı: ${oldQty} → ${newQty} ədəd\nQiymət: ${price}`,
   out_of_stock: (name) => `❌ <b>${name}</b>\nStokda yoxdur`,
   back_in_stock: (name, qty, price) => `🔔 <b>${name}</b>\nYenidən stokda: ${qty} ədəd\nQiymət: ${price}`,
+  back_in_stock_no_qty: (name, price) => `🔔 <b>${name}</b>\nYenidən stokda\nQiymət: ${price}`,
   price_change: (name, oldPrice, newPrice, dropped, delta) =>
     [
       `💰 <b>${name}</b>`,
@@ -143,10 +152,14 @@ const en: Dictionary = {
   support_reply_prefix: 'StockWatch support',
   price_unknown: 'Price unknown',
   below_threshold: (threshold) => `⚠️ Below your threshold (threshold: ${threshold})`,
-  stock_increase: (name, qty, price) => `📈 <b>${name}</b>\nStock increased: ${qty} pcs\nPrice: ${price}`,
-  stock_decrease: (name, qty, price) => `📉 <b>${name}</b>\nStock decreased: ${qty} pcs\nPrice: ${price}`,
+  open_product: 'View product',
+  stock_increase: (name, oldQty, newQty, price) =>
+    `📈 <b>${name}</b>\nStock increased: ${oldQty} → ${newQty} pcs\nPrice: ${price}`,
+  stock_decrease: (name, oldQty, newQty, price) =>
+    `📉 <b>${name}</b>\nStock decreased: ${oldQty} → ${newQty} pcs\nPrice: ${price}`,
   out_of_stock: (name) => `❌ <b>${name}</b>\nOut of stock`,
   back_in_stock: (name, qty, price) => `🔔 <b>${name}</b>\nBack in stock: ${qty} pcs\nPrice: ${price}`,
+  back_in_stock_no_qty: (name, price) => `🔔 <b>${name}</b>\nBack in stock\nPrice: ${price}`,
   price_change: (name, oldPrice, newPrice, dropped, delta) =>
     [
       `💰 <b>${name}</b>`,
@@ -185,10 +198,14 @@ const ru: Dictionary = {
   support_reply_prefix: 'Поддержка StockWatch',
   price_unknown: 'Цена неизвестна',
   below_threshold: (threshold) => `⚠️ Ниже вашего порога (порог: ${threshold})`,
-  stock_increase: (name, qty, price) => `📈 <b>${name}</b>\nОстаток увеличился: ${qty} шт.\nЦена: ${price}`,
-  stock_decrease: (name, qty, price) => `📉 <b>${name}</b>\nОстаток уменьшился: ${qty} шт.\nЦена: ${price}`,
+  open_product: 'Открыть товар',
+  stock_increase: (name, oldQty, newQty, price) =>
+    `📈 <b>${name}</b>\nОстаток увеличился: ${oldQty} → ${newQty} шт.\nЦена: ${price}`,
+  stock_decrease: (name, oldQty, newQty, price) =>
+    `📉 <b>${name}</b>\nОстаток уменьшился: ${oldQty} → ${newQty} шт.\nЦена: ${price}`,
   out_of_stock: (name) => `❌ <b>${name}</b>\nНет в наличии`,
   back_in_stock: (name, qty, price) => `🔔 <b>${name}</b>\nСнова в наличии: ${qty} шт.\nЦена: ${price}`,
+  back_in_stock_no_qty: (name, price) => `🔔 <b>${name}</b>\nСнова в наличии\nЦена: ${price}`,
   price_change: (name, oldPrice, newPrice, dropped, delta) =>
     [
       `💰 <b>${name}</b>`,
@@ -227,10 +244,14 @@ const tr: Dictionary = {
   support_reply_prefix: 'StockWatch destek',
   price_unknown: 'Fiyat bilinmiyor',
   below_threshold: (threshold) => `⚠️ Eşiğinizin altında (eşik: ${threshold})`,
-  stock_increase: (name, qty, price) => `📈 <b>${name}</b>\nStok arttı: ${qty} adet\nFiyat: ${price}`,
-  stock_decrease: (name, qty, price) => `📉 <b>${name}</b>\nStok azaldı: ${qty} adet\nFiyat: ${price}`,
+  open_product: 'Ürüne git',
+  stock_increase: (name, oldQty, newQty, price) =>
+    `📈 <b>${name}</b>\nStok arttı: ${oldQty} → ${newQty} adet\nFiyat: ${price}`,
+  stock_decrease: (name, oldQty, newQty, price) =>
+    `📉 <b>${name}</b>\nStok azaldı: ${oldQty} → ${newQty} adet\nFiyat: ${price}`,
   out_of_stock: (name) => `❌ <b>${name}</b>\nStokta yok`,
   back_in_stock: (name, qty, price) => `🔔 <b>${name}</b>\nTekrar stokta: ${qty} adet\nFiyat: ${price}`,
+  back_in_stock_no_qty: (name, price) => `🔔 <b>${name}</b>\nTekrar stokta\nFiyat: ${price}`,
   price_change: (name, oldPrice, newPrice, dropped, delta) =>
     [
       `💰 <b>${name}</b>`,
@@ -269,10 +290,14 @@ const de: Dictionary = {
   support_reply_prefix: 'StockWatch Support',
   price_unknown: 'Preis unbekannt',
   below_threshold: (threshold) => `⚠️ Unter Ihrem Schwellenwert (Schwelle: ${threshold})`,
-  stock_increase: (name, qty, price) => `📈 <b>${name}</b>\nBestand erhöht: ${qty} Stück\nPreis: ${price}`,
-  stock_decrease: (name, qty, price) => `📉 <b>${name}</b>\nBestand verringert: ${qty} Stück\nPreis: ${price}`,
+  open_product: 'Zum Produkt',
+  stock_increase: (name, oldQty, newQty, price) =>
+    `📈 <b>${name}</b>\nBestand erhöht: ${oldQty} → ${newQty} Stück\nPreis: ${price}`,
+  stock_decrease: (name, oldQty, newQty, price) =>
+    `📉 <b>${name}</b>\nBestand verringert: ${oldQty} → ${newQty} Stück\nPreis: ${price}`,
   out_of_stock: (name) => `❌ <b>${name}</b>\nNicht auf Lager`,
   back_in_stock: (name, qty, price) => `🔔 <b>${name}</b>\nWieder auf Lager: ${qty} Stück\nPreis: ${price}`,
+  back_in_stock_no_qty: (name, price) => `🔔 <b>${name}</b>\nWieder auf Lager\nPreis: ${price}`,
   price_change: (name, oldPrice, newPrice, dropped, delta) =>
     [
       `💰 <b>${name}</b>`,

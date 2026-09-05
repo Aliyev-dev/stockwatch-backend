@@ -120,6 +120,10 @@ async function dispatchChanges(
   for (const [index, change] of changes.slice(0, MAX_ALERTS_PER_SYNC).entries()) {
     if (index > 0) await sleep(DISPATCH_DELAY_MS);
 
+    // Logged before sending: this line is the record of exactly what the
+    // extension reported, which is where a wrong figure has to be traced back to.
+    log.info(`chat ${user.chat_id} ${change.product.asin}@${change.product.domain}: ${summariseChange(change)}`);
+
     const result = await notifier.sendToUser(user.chat_id, renderChange(change, language));
     if (!result.ok) {
       if (result.unreachable) {
@@ -198,6 +202,15 @@ export function createProductsRouter(deps: { config: Config; repo: Repo; notifie
     }
 
     try {
+      // Raw payload at debug level (LOG_LEVEL=debug), so a suspicious quantity can
+      // be checked against what actually arrived from the extension.
+      log.debug(
+        `sync from chat ${user.chat_id}: ` +
+          products
+            .map((p) => `${p.asin}@${p.domain} status=${p.status ?? '?'} qty=${p.quantity ?? '?'} price=${p.price ?? '?'}`)
+            .join(' | '),
+      );
+
       const result = await repo.syncProducts(user.chat_id, products);
       try {
         await repo.touchLastSeen(user.chat_id);
